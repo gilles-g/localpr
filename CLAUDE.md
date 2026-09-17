@@ -251,7 +251,7 @@ anything else.
 ## Still undecided
 
 `claude plugin validate --strict` passes: MIT `LICENSE`, `author` in `plugin.json` (name + GitHub
-URL, no email), and the two version fields aligned on `0.3.0` — `plugin.json` wins at install time.
+URL, no email), and the two version fields aligned on `0.5.0` — `plugin.json` wins at install time.
 The install snippet points at `gilles-g/localpr`, the repository's own remote.
 
 **The `marketplace.json` entry is no longer read for display alone.** Its `source` is pinned

@@ -1,7 +1,7 @@
 {
   "name": "localpr",
   "description": "Review a local git diff in a pull-request-style page, comment on lines, and hand the comments back to Claude with the protocol to apply them.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "Gilles Gauthier",
     "url": "https://github.com/gilles-g"
