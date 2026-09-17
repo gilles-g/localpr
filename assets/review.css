@@ -684,6 +684,8 @@ body.on-conversation .seg {
 .file-diff-body {
   overflow-x: auto;
   border-radius: 0 0 5px 5px;
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto var(--body-h, 600px);
 }
 .diff-table {
   width: max-content;
@@ -692,7 +694,7 @@ body.on-conversation .seg {
   font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
   font-size: 12px;
   line-height: 20px;
-  tab-size: 4;
+  tab-size: var(--tab, 4);
 }
 body.soft-wrap .diff-table {
   width: 100%;
@@ -715,9 +717,11 @@ body.soft-wrap .diff-table {
   font-variant-numeric: tabular-nums;
 }
 .add-comment-btn {
-  position: absolute;
-  left: 2px;
-  top: 1px;
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 25;
+  will-change: transform;
   width: 17px;
   height: 18px;
   padding: 0;
@@ -730,6 +734,10 @@ body.soft-wrap .diff-table {
   text-align: center;
   cursor: pointer;
   user-select: none;
+}
+.add-comment-btn.off {
+  opacity: 0;
+  pointer-events: none;
 }
 .diff-table td.line-code {
   padding: 0 10px 0 22px;

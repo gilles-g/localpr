@@ -63,6 +63,14 @@ To iterate on the rendering: generate the static page against a test repository 
 printed `file://` URL — the static page works with no server (fallback mode, comments in
 localStorage).
 
+Anything touching the page's cost is measured on a **generated repository of several hundred
+files** (the fixture is tiny, and nothing about the load shows on it), by driving Chromium with a
+real wheel scroll *and* real mouse moves: without the moves nothing scrolls under the cursor, and
+the whole hover cost disappears from the measurement. `Performance.getMetrics` over that sequence
+gives the useful numbers (`TaskDuration`, `LayoutCount`, `Nodes`); a `devtools.timeline` trace
+aggregated by event name says which of prepaint, paint or hit-test is paying. The reference to
+beat is the same page with JavaScript disabled.
+
 Neither `python3 -m py_compile` nor `--check` (beyond the parser) **proves anything here**: both
 went green on a version that raised a `NameError` on the first diff, and on desynchronised JS keys.
 A change is validated by **executing** the whole chain — static render, then the page actually
@@ -157,6 +165,26 @@ The parts that cannot be deduced from a single file:
   number live on the **cells** (`data-side` / `data-line`), not on the row — a split row holds one
   line of each side. A comment anchor is computed from that array, so it does not depend on the
   view showing.
+- **The page is sized for a review of hundreds of files, and every per-file cost is paid on
+  approach, not at load.** An `IntersectionObserver` (`rootMargin: 1500px`) is what calls
+  `preparer` — colouring, then the split rebuild; `prepares` holds what has been prepared, and
+  that set, not the whole document, is what a view switch replays. Colouring the whole review at
+  load doubled the node count of a 5 MB page, and the browser then paid for it on every frame.
+  Consequence: a section rebuilt *after* the threads were rendered loses the rows they sat in —
+  hence `rendreFilsDe(section)`, which re-renders that one file rather than the review.
+- **`content-visibility: auto` on `.file-diff-body` is what makes scrolling cheap**: off-screen
+  files are neither laid out nor painted nor hit-tested (a full scroll of a 600-file page went
+  from ~3.3 s to ~0.6 s of main-thread work, below what the same page costs with JS disabled).
+  It only holds because Python emits the exact height of each body — `--body-h`, rendered rows ×
+  `LINE_HEIGHT` — in `contain-intrinsic-block-size`: on a stylesheet guess the scrollbar jumps at
+  every file the scroll reaches. Placed on the *body*, never on the section, so a collapsed file
+  (body `display: none`) reserves nothing and the sticky header keeps working.
+- **The `+` button is a single floating element** parked on `<body>`, moved by `transform` and
+  dimmed by `.off` — never inserted into a cell, never `hidden`. Both mutate the layout tree of a
+  table holding thousands of rows, and the browser replays that walk at every hover: it was the
+  single biggest cost on the page (~900 ms of prepaint per 40 mouse moves). It is repositioned on
+  `#main`'s scroll, throttled by `requestAnimationFrame`, and its cell lives in
+  `boutonAjout.celluleAncree` — the DOM no longer says which line is hovered.
 
 ### Invariants not to be "repaired"
 

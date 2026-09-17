@@ -71,6 +71,7 @@ GENERATED = re.compile(
 )
 
 FILE_CAP = 400
+LINE_HEIGHT = 20
 GLOBAL_CAP = 15000
 MAX_PAYLOAD = 256 * 1024
 
@@ -648,7 +649,7 @@ JS = r"""
 
   function poseTab(n) {
     prefs.tab = +n || 4;
-    document.querySelectorAll('.diff-table').forEach(function (t) { t.style.tabSize = prefs.tab });
+    document.body.style.setProperty('--tab', prefs.tab);
     $('opt-tab').value = String(prefs.tab);
     sauvePrefs();
   }
@@ -678,6 +679,8 @@ JS = r"""
     document.body.classList.toggle('on-conversation', conv);
   }
 
+  var gabarit = document.createElement('template');
+
   function coloriser(section) {
     if (section.dataset.colorise || !section.dataset.language || !window.Render) return;
     section.dataset.colorise = '1';
@@ -685,16 +688,18 @@ JS = r"""
     section.querySelectorAll('tr.commentable .line-code').forEach(function (td) {
       var n = td.lastChild;
       if (!n || n.nodeType !== 3) return;
-      var s = document.createElement('span');
-      s.innerHTML = hl(n.textContent);
-      td.replaceChild(s, n);
+      gabarit.innerHTML = hl(n.textContent);
+      n.replaceWith(gabarit.content);
     });
   }
 
   function texteDe(td) {
-    var c = td.cloneNode(true);
-    c.querySelectorAll('.marker').forEach(function (n) { n.remove() });
-    return c.textContent;
+    var out = '';
+    for (var n = td.firstChild; n; n = n.nextSibling) {
+      if (n.nodeType === 1 && n.classList.contains('marker')) continue;
+      out += n.textContent;
+    }
+    return out;
   }
 
   /* The model is read once from the rendered unified table, colorised: the split view is
@@ -777,45 +782,57 @@ JS = r"""
 
   function appliquerVue(section) {
     var table = section.querySelector('.diff-table');
-    if (!table) return;
+    if (!table) return false;
     var estSplit = table.classList.contains('split');
-    if ((prefs.view === 'split') === estSplit) return;
+    if ((prefs.view === 'split') === estSplit) return false;
     section.querySelectorAll('.thread-row,.form-row-inline').forEach(function (n) { n.remove() });
     if (prefs.view === 'split') {
       section._unified = table;
       var t = document.createElement('table');
       t.className = 'diff-table split';
-      t.style.tabSize = prefs.tab;
       t.innerHTML = '<colgroup><col style="width:48px"><col><col style="width:48px"><col>' +
         '</colgroup><tbody>' + construireSplit(modele(section)) + '</tbody>';
       table.replaceWith(t);
     } else if (section._unified) {
       table.replaceWith(section._unified);
     }
+    return true;
   }
 
+  /* Colorising and the split rebuild are paid per file, on the DOM of a page that already holds
+     every line of the review: done for all of them at load, the browser spends its time there
+     instead of scrolling. Only what comes near the viewport is prepared. */
+  var sections = [], visibles = new Set(), prepares = new Set();
+
   function preparer(section) {
-    if (section.classList.contains('collapsed')) return;
+    if (section.classList.contains('collapsed')) { prepares.delete(section); return }
+    prepares.add(section);
     coloriser(section);
-    appliquerVue(section);
+    if (appliquerVue(section) && state) rendreFilsDe(section);
   }
 
   function poseVue(vue) {
     prefs.view = vue;
     $('view-split').setAttribute('aria-pressed', String(vue === 'split'));
     $('view-unified').setAttribute('aria-pressed', String(vue === 'unified'));
-    document.querySelectorAll('.file-diff').forEach(preparer);
+    prepares.forEach(function (s) { coloriser(s); appliquerVue(s) });
     sauvePrefs();
     rendreFils();
   }
 
-  function pourFichier(i) {
-    return state.comments.filter(function (c) { return String(c.fichier_index) === String(i) }).length;
+  function comptes() {
+    var par = {};
+    state.comments.forEach(function (c) {
+      var k = String(c.fichier_index);
+      par[k] = (par[k] || 0) + 1;
+    });
+    return par;
   }
 
   function majCompteurs() {
+    var par = comptes();
     document.querySelectorAll('.tree-file').forEach(function (b) {
-      var n = pourFichier(b.dataset.f), c = b.querySelector('.tree-badge');
+      var n = par[b.dataset.f] || 0, c = b.querySelector('.tree-badge');
       if (n && !c) {
         c = document.createElement('span');
         c.className = 'tree-badge';
@@ -828,7 +845,7 @@ JS = r"""
       if (c) { c.querySelector('b').textContent = n || ''; c.hidden = !n }
     });
     document.querySelectorAll('.file-diff').forEach(function (s) {
-      var n = pourFichier(s.dataset.f), c = s.querySelector('.thread-compteur');
+      var n = par[s.dataset.f] || 0, c = s.querySelector('.thread-compteur');
       if (c) { c.textContent = n; c.hidden = !n }
     });
     rendreTracker();
@@ -868,17 +885,21 @@ JS = r"""
     $('progress-fill').style.width = total ? Math.round(100 * n / total) + '%' : '0';
   }
 
-  function poseVu(section, on) {
-    var path = section.dataset.path;
-    if (on) vus[path] = 1; else delete vus[path];
-    ecrireJson(CLE_VUS, vus);
+  function appliquerVu(section, on) {
     section.classList.toggle('viewed', on);
     section.classList.toggle('collapsed', on);
     var boite = section.querySelector('[data-viewed]');
     if (boite) boite.checked = on;
-    var ligne = document.querySelector('.tree-file[data-f="' + section.dataset.f + '"]');
+    var ligne = ligneArbre(section);
     if (ligne) ligne.classList.toggle('viewed', on);
-    if (!on) preparer(section);
+    if (on) prepares.delete(section); else preparer(section);
+  }
+
+  function poseVu(section, on) {
+    var path = section.dataset.path;
+    if (on) vus[path] = 1; else delete vus[path];
+    ecrireJson(CLE_VUS, vus);
+    appliquerVu(section, on);
     majProgres();
   }
 
@@ -918,34 +939,64 @@ JS = r"""
     return t && t.classList.contains('split') ? 4 : 3;
   }
 
-  function rendreFils() {
-    document.querySelectorAll('.thread-row,.form-row-inline').forEach(function (n) { n.remove() });
-    document.querySelectorAll('tr.has-thread').forEach(function (n) { n.classList.remove('has-thread') });
-    $('globaux').innerHTML = '';
-    var repris = state.comments.map(function (c) { return c.reprisDe }).filter(Boolean);
-    var restants = D.findings.filter(function (f) { return repris.indexOf(f.id) < 0 });
-    var globaux = [];
+  function lectureSeule(c) {
+    return !!c.origin && String(c.id).charAt(0) === 'F';
+  }
 
-    state.comments.concat(restants).forEach(function (c) {
-      var readonly = !!c.origin && String(c.id).charAt(0) === 'F';
-      var section = c.fichier_index === null || c.fichier_index === undefined ? null
-        : document.querySelector('.file-diff[data-f="' + c.fichier_index + '"]');
-      if (!section) { globaux.push(corpsFil(c, readonly)); return }
-      if (section.classList.contains('collapsed')) {
+  function affiches() {
+    var repris = {};
+    state.comments.forEach(function (c) { if (c.reprisDe) repris[c.reprisDe] = 1 });
+    return state.comments.concat(D.findings.filter(function (f) { return !repris[f.id] }));
+  }
+
+  function insererFil(section, c) {
+    var ligne = '<tr class="thread-row"><td colspan="' + colonnes(section) + '">' +
+      corpsFil(c, lectureSeule(c)) + '</td></tr>';
+    var tr = cible(section, c);
+    if (tr) {
+      tr.insertAdjacentHTML('afterend', ligne);
+      tr.classList.add('has-thread');
+      return true;
+    }
+    var tb = section.querySelector('.diff-table tbody');
+    if (!tb) return false;
+    tb.insertAdjacentHTML('afterbegin', ligne);
+    return true;
+  }
+
+  /* A section rebuilt into the other view loses the rows its threads sat in: with the rebuild
+     deferred to the scroll, re-rendering the whole review there would cost every file. */
+  function rendreFilsDe(section) {
+    section.querySelectorAll('.thread-row,.form-row-inline').forEach(function (n) { n.remove() });
+    section.querySelectorAll('tr.has-thread').forEach(function (n) { n.classList.remove('has-thread') });
+    var idx = section.dataset.f;
+    affiches().forEach(function (c) {
+      if (String(c.fichier_index) === idx) insererFil(section, c);
+    });
+  }
+
+  function sectionDe(c) {
+    return c.fichier_index === null || c.fichier_index === undefined ? null
+      : document.querySelector('.file-diff[data-f="' + c.fichier_index + '"]');
+  }
+
+  function rendreFils() {
+    var liste = affiches();
+    liste.forEach(function (c) {
+      var section = sectionDe(c);
+      if (section && section.classList.contains('collapsed')) {
         section.classList.remove('collapsed');
         preparer(section);
       }
-      var tr = cible(section, c);
-      var ligne = '<tr class="thread-row"><td colspan="' + colonnes(section) + '">' +
-        corpsFil(c, readonly) + '</td></tr>';
-      if (tr) {
-        tr.insertAdjacentHTML('afterend', ligne);
-        tr.classList.add('has-thread');
-      } else {
-        var tb = section.querySelector('.diff-table tbody');
-        if (tb) tb.insertAdjacentHTML('afterbegin', ligne);
-        else globaux.push(corpsFil(c, readonly));
-      }
+    });
+    document.querySelectorAll('.thread-row,.form-row-inline').forEach(function (n) { n.remove() });
+    document.querySelectorAll('tr.has-thread').forEach(function (n) { n.classList.remove('has-thread') });
+    $('globaux').innerHTML = '';
+    var globaux = [];
+
+    liste.forEach(function (c) {
+      var section = sectionDe(c);
+      if (!section || !insererFil(section, c)) globaux.push(corpsFil(c, lectureSeule(c)));
     });
     $('globaux').innerHTML = globaux.join('');
     majCompteurs();
@@ -976,6 +1027,7 @@ JS = r"""
 
   function openForm(target, inTable, createWith, initial) {
     closeForm();
+    cacherAjout();
     var cols = inTable ? colonnes(target.closest('.file-diff')) : 0;
     var html = inTable
       ? '<tr class="form-row-inline"><td colspan="' + cols + '">' + champs(initial) + '</td></tr>'
@@ -1075,12 +1127,28 @@ JS = r"""
     });
   }
 
+  var lignesArbre = null, fichierActif = null;
+
+  function ligneArbre(section) {
+    if (!lignesArbre) {
+      lignesArbre = {};
+      document.querySelectorAll('.tree-file').forEach(function (b) { lignesArbre[b.dataset.f] = b });
+    }
+    return lignesArbre[section.dataset.f] || null;
+  }
+
+  /* Scrolling calls this on every tick: sweeping the sidebar and scrolling it into view when
+     nothing moved forces a layout of a document that holds the whole review. */
   function activerFichier(section, defiler) {
-    document.querySelectorAll('.tree-file.active').forEach(function (x) { x.classList.remove('active') });
-    var ligne = document.querySelector('.tree-file[data-f="' + section.dataset.f + '"]');
-    if (ligne) {
-      ligne.classList.add('active');
-      ligne.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+    if (section !== fichierActif) {
+      var ancienne = fichierActif && ligneArbre(fichierActif);
+      if (ancienne) ancienne.classList.remove('active');
+      fichierActif = section;
+      var ligne = ligneArbre(section);
+      if (ligne) {
+        ligne.classList.add('active');
+        ligne.scrollIntoView({ block: 'nearest', behavior: 'instant' });
+      }
     }
     if (defiler) section.scrollIntoView({ block: 'start', behavior: 'instant' });
   }
@@ -1108,11 +1176,38 @@ JS = r"""
     $('tree-empty').hidden = visibles > 0;
   }
 
+  /* Parked in the page, moved by transform: inserting it into a cell dirties the layout of a
+     table holding thousands of rows, and the browser replays it at every hover. */
   var boutonAjout = document.createElement('button');
   boutonAjout.type = 'button';
-  boutonAjout.className = 'add-comment-btn';
+  boutonAjout.className = 'add-comment-btn off';
   boutonAjout.textContent = '+';
   boutonAjout.title = 'Add a comment on this line';
+  boutonAjout.celluleAncree = null;
+  document.body.appendChild(boutonAjout);
+
+  /* Hiding it by `hidden` would drop its box out of the layout tree, and putting it back costs a
+     prepaint walk of the whole review at every hover: it only ever moves, by transform. */
+  function cacherAjout() {
+    if (!boutonAjout.celluleAncree) return;
+    boutonAjout.classList.add('off');
+    boutonAjout.celluleAncree = null;
+  }
+
+  function replacerAjout() {
+    var cellule = boutonAjout.celluleAncree;
+    if (!cellule) return;
+    var r = cellule.getBoundingClientRect(), zone = $('main').getBoundingClientRect();
+    if (r.bottom <= zone.top || r.top >= zone.bottom) { cacherAjout(); return }
+    boutonAjout.style.transform = 'translate(' + (r.left + 2) + 'px,' + (r.top + 1) + 'px)';
+  }
+
+  function ancrerAjout(cellule) {
+    if (boutonAjout.celluleAncree === cellule) return;
+    boutonAjout.celluleAncree = cellule;
+    replacerAjout();
+    boutonAjout.classList.remove('off');
+  }
 
   document.addEventListener('mouseover', function (e) {
     var cellule = e.target.closest('.line-num[data-line]');
@@ -1123,12 +1218,15 @@ JS = r"""
                                                 '"][data-line="' + code.dataset.line + '"]');
       }
     }
-    if (cellule) {
-      if (boutonAjout.parentNode !== cellule) cellule.appendChild(boutonAjout);
-    } else if (boutonAjout.parentNode) {
-      boutonAjout.remove();
-    }
+    if (cellule) ancrerAjout(cellule); else if (e.target !== boutonAjout) cacherAjout();
   });
+
+  var replacementPrevu = false;
+  $('main').addEventListener('scroll', function () {
+    if (!boutonAjout.celluleAncree || replacementPrevu) return;
+    replacementPrevu = true;
+    requestAnimationFrame(function () { replacementPrevu = false; replacerAjout() });
+  }, { passive: true });
 
   document.addEventListener('click', function (e) {
     var menu = $('settings-menu');
@@ -1212,7 +1310,8 @@ JS = r"""
     if (e.target.closest('.thread') || e.target.closest('.form-row-inline')) return;
 
     if (e.target === boutonAjout) {
-      var cellule = boutonAjout.parentNode;
+      var cellule = boutonAjout.celluleAncree;
+      if (!cellule) return;
       var section = cellule.closest('.file-diff');
       var side = cellule.dataset.side, line = cellule.dataset.line;
       openForm(cellule.parentNode, true, function (t, body) {
@@ -1236,13 +1335,11 @@ JS = r"""
   $('opt-tab').addEventListener('change', function (e) { poseTab(e.target.value) });
   $('opt-theme').addEventListener('change', function (e) { poseTheme(e.target.value) });
   $('opt-expand').addEventListener('click', function () {
-    document.querySelectorAll('.file-diff').forEach(function (s) {
-      s.classList.remove('collapsed');
-      preparer(s);
-    });
+    sections.forEach(function (s) { s.classList.remove('collapsed') });
+    visibles.forEach(preparer);
   });
   $('opt-collapse').addEventListener('click', function () {
-    document.querySelectorAll('.file-diff').forEach(function (s) { s.classList.add('collapsed') });
+    sections.forEach(function (s) { s.classList.add('collapsed'); prepares.delete(s) });
   });
   $('view-split').addEventListener('click', function () { poseVue('split') });
   $('view-unified').addEventListener('click', function () { poseVue('unified') });
@@ -1281,12 +1378,7 @@ JS = r"""
     if (champ || e.metaKey || e.ctrlKey || e.altKey || onglet !== 'files') return;
     if (e.key === '/') { e.preventDefault(); $('filter').focus(); return }
     if (e.key === 'j' || e.key === 'k') {
-      var sections = Array.prototype.slice.call(document.querySelectorAll('.file-diff'));
-      var haut = $('main').getBoundingClientRect().top;
-      var courant = 0;
-      sections.forEach(function (s, i) {
-        if (s.getBoundingClientRect().top - haut < 4) courant = i;
-      });
+      var courant = fichierActif ? fichierActif._i : 0;
       var suivant = sections[Math.max(0, Math.min(sections.length - 1, courant + (e.key === 'j' ? 1 : -1)))];
       if (suivant) { preparer(suivant); activerFichier(suivant, true) }
     }
@@ -1340,26 +1432,35 @@ JS = r"""
   $('view-split').setAttribute('aria-pressed', String(prefs.view === 'split'));
   $('view-unified').setAttribute('aria-pressed', String(prefs.view === 'unified'));
 
-  document.querySelectorAll('.file-diff').forEach(function (s) {
-    if (vus[s.dataset.path]) poseVu(s, true);
-    else preparer(s);
+  sections = Array.prototype.slice.call(document.querySelectorAll('.file-diff'));
+  sections.forEach(function (s, i) {
+    s._i = i;
+    if (vus[s.dataset.path]) appliquerVu(s, true);
   });
   majProgres();
   rendreFils();
   majJson();
 
   (function suivreDefilement() {
-    var sections = Array.prototype.slice.call(document.querySelectorAll('.file-diff'));
-    if (!sections.length || !window.IntersectionObserver) return;
+    if (!sections.length) return;
+    if (!window.IntersectionObserver) { sections.forEach(preparer); return }
+
+    var proches = new IntersectionObserver(function (entries) {
+      entries.forEach(function (x) {
+        if (!x.isIntersecting) { visibles.delete(x.target); return }
+        visibles.add(x.target);
+        preparer(x.target);
+      });
+    }, { root: $('main'), rootMargin: '1500px 0px' });
+    sections.forEach(function (s) { proches.observe(s) });
+
     var vues = new Set();
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (x) {
         if (x.isIntersecting) vues.add(x.target); else vues.delete(x.target);
       });
       var haut = null;
-      vues.forEach(function (s) {
-        if (!haut || s.getBoundingClientRect().top < haut.getBoundingClientRect().top) haut = s;
-      });
+      vues.forEach(function (s) { if (!haut || s._i < haut._i) haut = s });
       if (haut) activerFichier(haut, false);
     }, { root: $('main'), rootMargin: '0px 0px -70% 0px' });
     sections.forEach(function (s) { io.observe(s) });
@@ -1569,6 +1670,9 @@ def render_file(f, restant):
             inner += (f'<div class="truncated">… {fmt_num(total - shown)} more line(s), '
                       f'not shown (cap of {FILE_CAP} per file)</div>')
 
+    # Reserved for a body not laid out yet: a stylesheet guess makes the scrollbar jump.
+    hauteur = inner.count("<tr") * LINE_HEIGHT + (34 if coupe else 0) or 60
+
     large = max([len(str(l["after"] or l["before"] or "")) for h in f["hunks"]
                  for l in h["lines"]] or [2])
 
@@ -1588,7 +1692,8 @@ def render_file(f, restant):
     return (
         f'<section class="file-diff{" collapsed" if replie else ""}" id="f{f["index"]}"'
         f' data-f="{f["index"]}" data-path="{esc(f["path"])}"'
-        f' data-language="{language_of(f["path"])}" style="--num-w:{large}ch">'
+        f' data-language="{language_of(f["path"])}"'
+        f' style="--num-w:{large}ch;--body-h:{hauteur}px">'
         f'<div class="file-diff-head">'
         f'<button class="chevron" aria-label="collapse or expand">{CHEVRON}</button>'
         f'<span class="st-{f["status"]}" title="{esc(STATUS_LABEL.get(f["status"], "modified"))}">'
