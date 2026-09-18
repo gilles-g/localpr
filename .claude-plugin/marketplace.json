@@ -13,10 +13,10 @@
       "source": {
         "source": "github",
         "repo": "gilles-g/localpr",
-        "ref": "v0.5.0"
+        "ref": "v0.5.2"
       },
       "description": "Review a local git diff in a pull-request-style page, comment on lines, and hand the comments back to Claude with the protocol to apply them.",
-      "version": "0.5.0",
+      "version": "0.5.2",
       "category": "workflow",
       "keywords": [
         "review",

@@ -681,14 +681,29 @@ JS = r"""
 
   var gabarit = document.createElement('template');
 
+  /* One highlighter per side, restarted at each hunk: its state (an open string or comment) must
+     not cross the lines git did not show, nor leak from a deleted line into the added one that
+     replaces it. A docblock opened over a hunk boundary painted the rest of the file as comment. */
   function coloriser(section) {
     if (section.dataset.colorise || !section.dataset.language || !window.Render) return;
     section.dataset.colorise = '1';
-    var hl = Render.highlighterFor(section.dataset.language);
-    section.querySelectorAll('tr.commentable .line-code').forEach(function (td) {
-      var n = td.lastChild;
+    var langue = section.dataset.language, avant = null, apres = null;
+    function rouvrir() {
+      avant = Render.highlighterFor(langue);
+      apres = Render.highlighterFor(langue);
+    }
+    rouvrir();
+    section.querySelectorAll('.diff-table > tbody > tr').forEach(function (tr) {
+      if (tr.classList.contains('hunk')) { rouvrir(); return }
+      if (!tr.classList.contains('commentable')) return;
+      var td = tr.querySelector('td.line-code');
+      var n = td && td.lastChild;
       if (!n || n.nodeType !== 3) return;
-      gabarit.innerHTML = hl(n.textContent);
+      var texte = n.textContent, html;
+      if (tr.classList.contains('del')) html = avant(texte);
+      else if (tr.classList.contains('add')) html = apres(texte);
+      else { avant(texte); html = apres(texte) }
+      gabarit.innerHTML = html;
       n.replaceWith(gabarit.content);
     });
   }
