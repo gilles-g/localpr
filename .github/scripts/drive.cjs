@@ -84,6 +84,20 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
   await page.waitForTimeout(500);
   expect('markdown escaped', (await page.locator('#globaux .comment-body').innerHTML()) === '<p><strong>bold</strong> and &lt;b&gt;xss?&lt;/b&gt;</p>');
 
+  expect('send button counts what is not sent', (await page.locator('#envoyer').innerText()) === 'Send 3 comment(s)');
+  await page.click('#envoyer');
+  await page.waitForTimeout(800);
+  expect('batch sent', (await page.locator('#state-enreg').innerText()).includes('batch 1 sent'));
+  const batch = path.join(out, 'batch-1.md');
+  expect('batch-1.md holds the three comments', fs.existsSync(batch) &&
+    fs.readFileSync(batch, 'utf8').startsWith('# 3 comment(s) to handle'));
+  expect('events.log announces the batch',
+    fs.readFileSync(path.join(out, 'events.log'), 'utf8').includes(`batch 1: 3 comment(s) - to handle: ${batch}`));
+  expect('server still up after a batch', fs.existsSync(path.join(out, 'server.json')) &&
+    (await page.evaluate(() => fetch('/ping', { method: 'POST', headers: { 'X-Localpr-Token': window.LOCALPR.token } }).then((r) => r.status))) === 200);
+  expect('a sent comment can no longer be deleted', (await page.locator('[data-sup]').count()) === 0);
+  expect('nothing left to send', await page.locator('#envoyer').isDisabled());
+
   await page.evaluate(() => {
     const cle = 'localpr:' + window.LOCALPR.repo + ':' + window.LOCALPR.base;
     const st = JSON.parse(localStorage.getItem(cle));
@@ -104,6 +118,10 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
   await page.waitForTimeout(1500);
   expect('review sent', (await page.locator('#state-enreg').innerText()).includes('review sent'));
   expect('TODO.md written', fs.existsSync(path.join(out, 'TODO.md')));
+  const todo = fs.readFileSync(path.join(out, 'TODO.md'), 'utf8');
+  expect('TODO.md repeats nothing already sent', todo.startsWith('# 1 comment(s) to handle') &&
+    todo.includes('Already sent and not repeated here: batch-1.md.'));
+  expect('a sent comment stays sent after a reload', (await page.locator('.badge-outline', { hasText: /^sent$/ }).count()) === 3);
   expect('done sentinel written', fs.existsSync(path.join(out, 'done')));
   expect('server.json removed on clean shutdown', !fs.existsSync(path.join(out, 'server.json')));
   expect('no JS error', errors.length === 0);

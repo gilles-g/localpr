@@ -14,7 +14,8 @@ offline.
 terminal, and "this line is wrong" has to be retyped into a chat.
 
 localpr renders the diff as a page, anchors each comment to a line, and on **Finish review** writes
-a `TODO.md` that Claude Code reads back. Each comment carries its kind:
+a `TODO.md` that Claude Code reads back. **Send comments** hands over what is written so far without
+ending the review: Claude handles that batch while you keep reading. Each comment carries its kind:
 
 | kind | what happens to it |
 |---|---|
@@ -57,7 +58,9 @@ Everything lands in `~/.claude/reviews/<project>/<timestamp>/`:
 | `review.html` | the page |
 | `diff.json` | the data model — the source of truth for comment anchors |
 | `comments.json` | the review, rewritten atomically on every save |
-| `TODO.md` | the comments grouped by file, plus how to handle them |
+| `batch-<n>.md` | the comments handed over by **Send comments**, the review still going on |
+| `events.log` | one line per batch, then one when the server stops — what Claude watches |
+| `TODO.md` | the comments no batch carried, grouped by file, plus how to handle them |
 | `replies/<id>.json` | one reply per comment, written when they are applied |
 | `done` | sentinel: the review is over |
 

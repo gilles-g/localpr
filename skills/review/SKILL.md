@@ -22,15 +22,30 @@ Do not open the browser for them.
 State these two points, one line each, because neither is guessable:
 
 - the page **does not refresh** — the diff is frozen; the `↻` button, top right, re-collects it;
-- **Finish review** saves the comments, writes a `TODO.md` and **shuts the server down**. Without
-  that click, the server stops on its own 5 minutes after the tab is closed, and in any case after
-  an hour.
+- **Send comments** hands over the comments written so far and **keeps the server running**: the
+  review goes on while they are handled, and `↻` shows the replies. **Finish review** hands over
+  the rest, writes a `TODO.md` and **shuts the server down**. Without that click, the server stops
+  on its own 5 minutes after the tab is closed, and in any case after an hour.
 
-Then do **nothing**: do not wait, do not poll, do not relaunch the page. This is a human review and
-it takes as long as it takes. When the developer comes back ("I'm done", "finished the review", or
-a pasted JSON blob), read the `TODO.md` in the output directory: it carries the comments grouped by
-file **and** the protocol for handling them. The directory is announced at launch, and `--list`
-finds it again.
+Then arm a **Monitor** on the output directory's event log, and nothing else — no polling, no
+relaunch. This is a human review and it takes as long as it takes:
+
+```bash
+tail -n 0 -F "<out>/events.log"
+```
+
+with the maximum timeout, re-armed on each expiry while the server is alive (`--list`). Every line
+is an event:
+
+- `batch <n>: … - to handle: <path>` — read that `batch-<n>.md` and handle it now: it carries the
+  comments grouped by file **and** the protocol for handling them. The developer is still reading;
+  leave the page and the server alone.
+- `done: … - to handle: <path>` — read `TODO.md`, the comments no batch carried; stop the monitor.
+- `stopped: …` — the server died without *Finish review*; stop the monitor and say so.
+
+When the developer comes back instead ("I'm done", "I sent a batch", or a pasted JSON blob), read
+the newest `batch-<n>.md` or the `TODO.md` in the output directory. The directory is announced at
+launch, and `--list` finds it again.
 
 Options worth knowing, to be passed only when the request calls for them:
 

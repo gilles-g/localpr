@@ -474,6 +474,9 @@ body.on-conversation .seg {
   font-weight: 400;
   font-size: 11px;
 }
+.ct-pending {
+  color: var(--fg-muted);
+}
 .ct-open {
   color: var(--attention-fg);
 }
@@ -531,6 +534,9 @@ body.on-conversation .seg {
   border-radius: 50%;
   flex: 0 0 auto;
   background: var(--attention-emphasis);
+}
+.tracker-dot.pending {
+  background: var(--neutral-emphasis);
 }
 .tracker-dot.replied {
   background: var(--accent-emphasis);

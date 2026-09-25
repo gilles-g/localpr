@@ -13,7 +13,10 @@ Outputs, under --out (default ~/.claude/reviews/<project>/<timestamp>/):
     replies/<id>.json   one reply per comment, written by the agents
     findings.json       optional, imported through --findings
     server.json         {url, port, token, pid} in --serve mode
-    TODO.md             the comments grouped by file, plus how to handle them
+    batch-<n>.md        the comments sent in batch n, the server still running
+    batches.json        which comment went in which batch
+    events.log          one line per batch, then one when the server stops
+    TODO.md             the comments not sent in a batch, plus how to handle them
     done                sentinel meaning the review is over
 
 The reviewer's display preferences (theme, layout, sidebar) go to ~/.config/localpr/prefs.json,
@@ -596,7 +599,8 @@ JS = r"""
   var CLE = 'localpr:' + D.repo + ':' + D.base;
   var CLE_VUS = 'localpr:viewed:' + D.repo + ':' + D.base;
   var CLE_PREFS = 'localpr:prefs';
-  var server = false, state = null, seq = 0;
+  var server = false, state = null, seq = 0, envoyes = {};
+  (D.sent || []).forEach(function (id) { envoyes[id] = 1 });
   var SEVS = { fix: 'blocking', followUp: 'nitpick', workflowNote: 'question' };
   var LIBS = { fix: 'Must fix', followUp: 'Follow-up', workflowNote: 'Workflow note' };
 
@@ -868,14 +872,14 @@ JS = r"""
 
   function etatDe(c) {
     var rep = D.replies[c.id];
-    if (!rep) return 'open';
+    if (!rep) return envoyes[c.id] ? 'open' : 'pending';
     return rep.verdict === 'fixed' ? 'done' : 'replied';
   }
 
   function rendreTracker() {
     var liste = $('tracker-list');
     $('tracker').hidden = state.comments.length === 0;
-    var compte = { open: 0, replied: 0, done: 0 };
+    var compte = { pending: 0, open: 0, replied: 0, done: 0 };
     liste.innerHTML = state.comments.map(function (c) {
       var e = etatDe(c);
       compte[e]++;
@@ -885,12 +889,16 @@ JS = r"""
         '<span class="tracker-file">' + esc(ou) + '</span></span>' +
         '<span class="tracker-body">' + esc(c.body) + '</span></button>';
     }).join('');
+    $('ct-pending').textContent = compte.pending + ' not sent';
     $('ct-open').textContent = compte.open + ' open';
     $('ct-replied').textContent = compte.replied + ' replied';
     $('ct-done').textContent = compte.done + ' done';
     $('conversation-empty').hidden = state.comments.length > 0;
     $('tab-count').hidden = state.comments.length === 0;
-    $('tab-count').textContent = compte.open + ' open';
+    $('tab-count').textContent = (compte.pending + compte.open) + ' open';
+    var be = $('envoyer');
+    be.textContent = compte.pending ? 'Send ' + compte.pending + ' comment(s)' : 'Send comments';
+    be.disabled = !compte.pending || $('terminer').disabled;
   }
 
   function majProgres() {
@@ -928,6 +936,7 @@ JS = r"""
     if (c.side === 'old') h += '<span class="badge-outline">deleted line</span>';
     if (c.scope === 'file') h += '<span class="badge-outline">whole file</span>';
     if (c.scope === 'global') h += '<span class="badge-outline">global scope</span>';
+    if (envoyes[c.id]) h += '<span class="badge-outline">sent</span>';
     h += '<span style="margin-left:auto" class="mono">' + esc(c.id) + '</span></div>';
     h += '<div class="comment-body md">' + Render.markdown(c.body) + '</div>';
     if (rep) {
@@ -936,8 +945,9 @@ JS = r"""
         esc(rep.verdict) + '</b> — ' + esc(rep.response) + '</div>';
     }
     h += '<div class="thread-actions">';
+    // Deleting a sent comment would not reach the agent already handling it.
     h += readonly ? '<button data-rep="' + esc(c.id) + '">take up this finding</button>'
-                  : '<button data-sup="' + esc(c.id) + '">delete</button>';
+       : envoyes[c.id] ? '' : '<button data-sup="' + esc(c.id) + '">delete</button>';
     h += '</div></div></div>';
     return h;
   }
@@ -1423,6 +1433,23 @@ JS = r"""
     post('/done', state).then(function () {
       setStatus('review sent — ' + state.comments.length + ' comment(s)', 'praise');
       bt.disabled = true;
+      $('envoyer').disabled = true;
+    }).catch(function () { switchToFallback('server unreachable - comments kept locally') });
+  });
+
+  var be = $('envoyer');
+  be.addEventListener('click', function () {
+    if (!server) { switchToFallback('no server: copy the JSON and paste it into the chat'); return }
+    be.disabled = true;
+    state.updated = maintenant();
+    ecrireLocal();
+    post('/batch', state).then(function (r) { return r.json() }).then(function (res) {
+      if (res.batch) {
+        res.batch.comments.forEach(function (id) { envoyes[id] = 1 });
+        setStatus('batch ' + res.batch.n + ' sent — ' + res.batch.comments.length +
+                  ' comment(s), keep reading', 'praise');
+      }
+      rendreFils();
     }).catch(function () { switchToFallback('server unreachable - comments kept locally') });
   });
 
@@ -1816,6 +1843,9 @@ def render_toolbar(model):
         '<button class="btn btn-sm" id="global" title="comment on the review as a whole">'
         '+ Global</button>'
         '<button class="btn btn-sm" id="regen" title="re-collect the diff">↻</button>'
+        '<button class="btn btn-sm" id="envoyer" disabled'
+        ' title="hand the comments not sent yet to Claude, and keep reviewing">'
+        'Send comments</button>'
         '<button class="btn btn-sm btn-primary" id="terminer">Finish review</button>'
         '</header>'
     )
@@ -1834,7 +1864,7 @@ def render_tabs(model):
     )
 
 
-def render(model, comments, findings, replies, token):
+def render(model, comments, findings, replies, token, sent=()):
     body, restant = [], GLOBAL_CAP
     for f in model["files"]:
         html_f, shown = render_file(f, restant)
@@ -1843,7 +1873,7 @@ def render(model, comments, findings, replies, token):
 
     donnees = {
         "repo": model["repo"], "base": model["base"], "token": token or "",
-        "comments": comments, "findings": findings, "replies": replies,
+        "comments": comments, "findings": findings, "replies": replies, "sent": list(sent),
         "files": [{"path": f["path"], "fingerprint": f["fingerprint"]}
                   for f in model["files"]],
     }
@@ -1873,6 +1903,7 @@ def render(model, comments, findings, replies, token):
         'line from the <b>Files changed</b> tab.</p>'
         '<div class="tracker" id="tracker" hidden>'
         '<div class="tracker-head">Comments<span class="tracker-counts">'
+        '<span class="ct-pending" id="ct-pending">0 not sent</span>'
         '<span class="ct-open" id="ct-open">0 open</span>'
         '<span class="ct-replied" id="ct-replied">0 replied</span>'
         '<span class="ct-done" id="ct-done">0 done</span></span></div>'
@@ -2126,6 +2157,9 @@ class Review:
         self.blob = b""
         self.model = None
         self.last_seen = time.time()
+        lots = read_json(out / "batches.json")
+        self.lots = lots if isinstance(lots, list) else []
+        self.verrou = threading.Lock()
 
     def url(self):
         return f"http://127.0.0.1:{self.port}/review.html?t={self.token}"
@@ -2142,7 +2176,7 @@ class Review:
         localStorage."""
         findings = index_findings(load_findings(self.findings), self.model)
         page = render(self.model, read_json(self.out / "comments.json"), findings,
-                      load_replies(self.out / "replies"), self.token)
+                      load_replies(self.out / "replies"), self.token, sent_ids(self.lots))
         self.blob = page.encode("utf-8")
         write_atomic(self.out / "review.html",
                         page.replace(f'"token": "{self.token}"', '"token": ""'))
@@ -2153,6 +2187,50 @@ class Review:
                         json.dumps(self.model, ensure_ascii=False, indent=2))
         self.rendre()
         return self.model
+
+    def non_envoyes(self, state):
+        envoyes = set(sent_ids(self.lots))
+        return [c for c in state["comments"] if c["id"] not in envoyes]
+
+    def envoyer_lot(self, state):
+        """Two batches posted at once would each claim the same comments."""
+        with self.verrou:
+            nouveaux = self.non_envoyes(state)
+            if not nouveaux:
+                return None
+            n = len(self.lots) + 1
+            todo = self.out / f"batch-{n}.md"
+            write_todo(self, state, nouveaux, todo, FINISH_BATCH)
+            self.lots.append({"n": n, "at": state["updated"], "todo": str(todo),
+                              "comments": [c["id"] for c in nouveaux]})
+            write_atomic(self.out / "batches.json",
+                         json.dumps(self.lots, ensure_ascii=False, indent=2))
+            self.signaler(f"batch {n}: {len(nouveaux)} comment(s) - to handle: {todo}")
+            return self.lots[-1]
+
+    def terminer(self, state):
+        with self.verrou:
+            deja = [Path(lot["todo"]).name for lot in self.lots
+                    if isinstance(lot, dict) and isinstance(lot.get("todo"), str)]
+            note = (f"Already sent and not repeated here: {', '.join(deja)}." if deja else None)
+            restants = self.non_envoyes(state)
+            write_todo(self, state, restants, self.out / "TODO.md", FINISH_REVIEW, note)
+            (self.out / "done").write_text(
+                f"{len(restants)} comment(s) - {state['updated']}\n"
+                f"to handle: {self.out / 'TODO.md'}\n",
+                encoding="utf-8")
+
+    def signaler(self, ligne):
+        """The server keeps running after a batch: its stdout is not something an agent can wait
+        on, a file it can tail is."""
+        print(ligne, flush=True)
+        with open(self.out / "events.log", "a", encoding="utf-8") as log:
+            log.write(ligne + "\n")
+
+
+def sent_ids(lots):
+    return [cid for lot in lots if isinstance(lot, dict)
+            for cid in lot.get("comments") or [] if isinstance(cid, str)]
 
 
 PROTOCOL = """
@@ -2200,26 +2278,39 @@ handled with the right to follow their tests.
 explicit**: a wrong comment must come back as such, with its reason. Applying a mistaken remark out
 of obedience is a failure. The page shows the reply under its thread on the next render.
 
-**To finish**: replay the project's own check (`grep -E '^[a-z-]+:' Makefile`, typically
-`make quality` then the tests) and never claim green without the command's output. Then regenerate
-the page so the replies show up:
-`python3 <path to localpr.py> <root> --out <this directory>`.
-
 **Nothing is ever committed**: the working tree is modified, `git status` / `git diff` is there to
 be read, and the developer commits.
 """
 
+FINISH_REVIEW = """
+**To finish**: replay the project's own check (`grep -E '^[a-z-]+:' Makefile`, typically
+`make quality` then the tests) and never claim green without the command's output. Then regenerate
+the page so the replies show up:
+`python3 <path to localpr.py> <root> --out <this directory>`.
+"""
 
-def write_todo(review, state):
+FINISH_BATCH = """
+**This is one batch: the review is still going on.** The developer keeps reading the diff and the
+server keeps running. Replay the project's own check (`grep -E '^[a-z-]+:' Makefile`, typically
+`make quality` then the tests) and never claim green without the command's output, but **do not
+regenerate the page and do not stop the server**: a static render would rewrite `diff.json` under
+the live page, and the page's ↻ button already re-collects the diff and shows your replies. Other
+batches may follow as `batch-<n>.md`; the review ends with `TODO.md`, which repeats nothing already
+sent.
+"""
+
+
+def write_todo(review, state, entrees, cible, fin, note=None):
     """The instructions travel with the data.
 
     Knowledge filed away in a skill only loads if someone invokes it; placed here, it arrives with
     the comments, at the moment they are handled.
     """
-    entrees = state.get("comments") or []
     lines = [f"# {len(entrees)} comment(s) to handle - {state.get('updated', '')}", "",
               f"Repository: `{review.repo}` · base `{review.base or 'HEAD'}`", "",
               "Raw data: `comments.json` · frozen diff: `diff.json`", ""]
+    if note:
+        lines += [note, ""]
 
     par_fichier = {}
     for c in entrees:
@@ -2248,8 +2339,8 @@ def write_todo(review, state):
                 lines.append(f"  anchor: `{extrait.strip()}`")
         lines.append("")
 
-    lines.append(PROTOCOL.strip())
-    write_atomic(review.out / "TODO.md", "\n".join(lines) + "\n")
+    lines += [PROTOCOL.strip(), "", fin.strip()]
+    write_atomic(cible, "\n".join(lines) + "\n")
 
 
 def make_handler(review, stop):
@@ -2336,23 +2427,20 @@ def make_handler(review, stop):
                 t = review.regenerer()["totals"]
                 return self.repondre(200, json.dumps({"ok": True, "totals": t}).encode("utf-8"))
 
-            if self.path in ("/comments", "/done"):
+            if self.path in ("/comments", "/batch", "/done"):
                 try:
                     state = sanitize_state(json.loads(raw.decode("utf-8", errors="replace")))
                 except (ValueError, UnicodeError) as e:
                     return self.refuser(400, f"state refused: {e}")
                 write_atomic(review.out / "comments.json",
                                 json.dumps(state, ensure_ascii=False, indent=2))
+                lot = review.envoyer_lot(state) if self.path == "/batch" else None
                 review.rendre()
                 if self.path == "/done":
-                    write_todo(review, state)
-                    (review.out / "done").write_text(
-                        f"{len(state['comments'])} comment(s) - {state['updated']}\n"
-                        f"to handle: {review.out / 'TODO.md'}\n",
-                        encoding="utf-8")
+                    review.terminer(state)
                     threading.Thread(target=stop, daemon=True).start()
                 return self.repondre(200, json.dumps(
-                    {"ok": True, "n": len(state["comments"])}).encode("utf-8"))
+                    {"ok": True, "n": len(state["comments"]), "batch": lot}).encode("utf-8"))
 
             return self.refuser(404, "unknown route")
 
@@ -2425,8 +2513,8 @@ def serve(review, max_minutes):
     httpd.server_close()
     (review.out / "server.json").unlink(missing_ok=True)
     fin = review.out / "done"
-    print(fin.read_text(encoding="utf-8").strip() if fin.exists()
-          else "server stopped without Finish review")
+    review.signaler("done: " + fin.read_text(encoding="utf-8").strip().replace("\n", " - ")
+                    if fin.exists() else "stopped: server stopped without Finish review")
 
 
 def answers(url, token):
@@ -2572,9 +2660,11 @@ def main():
     findings = index_findings(load_findings(a.findings or (out / "findings.json")), model)
     comments = read_json(out / "comments.json")
     replies = load_replies(out / "replies")
+    lots = read_json(out / "batches.json")
 
     page = out / "review.html"
-    write_atomic(page, render(model, comments, findings, replies, None))
+    write_atomic(page, render(model, comments, findings, replies, None,
+                              sent_ids(lots if isinstance(lots, list) else [])))
     t = model["totals"]
     print(f"{t['files']} file(s), +{t['additions']}/-{t['deletions']}")
     print(f"file://{page}")

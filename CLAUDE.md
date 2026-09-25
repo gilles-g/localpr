@@ -201,8 +201,13 @@ They are stated in the module docstring, and read like bugs to anyone who does n
 Ephemeral port on `127.0.0.1`, mandatory token (`?t=` query on GET, `X-Localpr-Token` header on POST),
 `Host` **and** `Origin` checked (DNS rebinding), `OPTIONS` always answers 403 — the absence of a CORS
 header makes the preflight a third-party page would trigger fail — body capped at `MAX_PAYLOAD`.
-Routes: `GET /review.html`, then `POST` on `/ping`, `/prefs`, `/regenerate`, `/comments` and
-`/done`. Three shutdown paths: *Finish review*, `SILENCE_MAX` (300 s) with no request at all, `--max-minutes`
+Routes: `GET /review.html`, then `POST` on `/ping`, `/prefs`, `/regenerate`, `/comments`, `/batch`
+and `/done`. `/batch` is *Send comments*: the comments no earlier batch carried go to
+`batch-<n>.md`, their ids to `batches.json` (`Review.lots`, under a lock), and the server keeps
+running; `/done` only writes into `TODO.md` what no batch carried. The agent learns of a batch
+through `events.log` (`Review.signaler`: `batch …`, `done: …`, `stopped: …`), which the skill tails
+with a Monitor — stdout of a background server is nothing it can wait on. A sent comment loses
+its delete button: a deletion would never reach the agent already handling it. Three shutdown paths: *Finish review*, `SILENCE_MAX` (300 s) with no request at all, `--max-minutes`
 (60 by default). `server.json` is deleted on clean shutdown: a `server.json` with no live process is
 the record of a server that was killed, not of one that is running. A live pid proves nothing
 either — the number goes to the next process to start — so `live_servers` only calls a server
@@ -254,14 +259,10 @@ anything else.
 URL, no email), and the two version fields aligned on `0.5.2` — `plugin.json` wins at install time.
 The install snippet points at `gilles-g/localpr`, the repository's own remote.
 
-**The `marketplace.json` entry is no longer read for display alone.** Its `source` is pinned
-(`source: github`, `repo`, `ref: v<version>`) instead of the `./` that served whatever sat on the
-default branch: people install this now, and a broken commit on `main` used to reach them within
-the second, with no release to roll back to. Consequence — **`ref` is a dangling pointer until the
-tag is pushed**: bumping the version means bumping `ref` *and* pushing the annotated tag it names,
-in that order. A `marketplace.json` on `main` naming a tag that does not exist on the remote
-breaks every installation, and `check_assets.py` does not see it — it only compares the two
-version fields to each other.
+The `marketplace.json` entry **follows `main`**: its `source` is `./`, no tag, no `ref`. Whatever
+sits on the default branch is what gets installed, so a broken commit on `main` reaches users
+directly — and since the install cache is keyed by the version, they only pick a change up once
+`version` is bumped in both manifests.
 
 What remains open: the plugin has never been published, so everything but `README.md` is still
 untracked, and whether `CLAUDE.md` itself belongs in the published tree is the developer's call.
