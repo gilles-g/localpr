@@ -378,6 +378,44 @@ window.Render = (function () {
     }
   }
 
+  const TWIG_OPERATORS = /^(?:in|is|not|and|or|b-and|b-or|b-xor|if|else|elseif|as|with|only|from|import|matches|starts with|ends with|same as|divisible by)\b/
+  const TWIG_CONSTANTS = /^(?:true|false|null|none)\b/
+
+  function twigTag(open, body, close) {
+    if (open === '{#') return span('pl-c', open + body + close)
+
+    let out = span('pl-k', open)
+    let index = 0
+    let first = open.startsWith('{%')
+
+    while (index < body.length) {
+      const rest = body.slice(index)
+      let hit
+      if ((hit = rest.match(/^\s+/))) { out += escapeHtml(hit[0]); index += hit[0].length; continue }
+      if ((hit = rest.match(/^("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/))) { out += span('pl-s', hit[0]); index += hit[0].length; continue }
+      if ((hit = rest.match(/^\d+(?:\.\d+)?/))) { out += span('pl-c1', hit[0]); index += hit[0].length; continue }
+      if ((hit = rest.match(/^\|\s*[A-Za-z_]\w*/))) {
+        out += escapeHtml('|') + span('pl-en', hit[0].slice(1))
+        index += hit[0].length
+        continue
+      }
+      if ((hit = rest.match(/^[A-Za-z_][\w-]*/))) {
+        const word = hit[0]
+        if (first) out += span('pl-k', word)
+        else if (TWIG_CONSTANTS.test(word)) out += span('pl-c1', word)
+        else if (TWIG_OPERATORS.test(word)) out += span('pl-k', word)
+        else if (/^\s*\(/.test(body.slice(index + word.length))) out += span('pl-en', word)
+        else out += escapeHtml(word)
+        first = false
+        index += word.length
+        continue
+      }
+      out += escapeHtml(rest[0])
+      index += 1
+    }
+    return out + span('pl-k', close)
+  }
+
   function markup() {
     let inComment = false
     let inTag = false
@@ -400,9 +438,9 @@ window.Render = (function () {
 
         if (!inTag) {
           if (rest.startsWith('<!--')) { inComment = true; out += span('pl-c', '<!--'); index += 4; continue }
-          const twig = rest.match(/^(\{\{|\{%|\{#)([\s\S]*?)(\}\}|%\}|#\})/)
+          const twig = rest.match(/^(\{\{-?|\{%-?|\{#)([\s\S]*?)(-?\}\}|-?%\}|#\})/)
           if (twig) {
-            out += span(twig[1] === '{#' ? 'pl-c' : 'pl-k', twig[0])
+            out += twigTag(twig[1], twig[2], twig[3])
             index += twig[0].length
             continue
           }
