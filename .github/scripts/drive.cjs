@@ -114,14 +114,38 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
   expect('a locally kept comment outlives a page served with an older stamp',
     (await page.locator('#tracker-list .tracker-item').count()) === 4);
 
+  await page.click('#global');
+  await page.locator('.form-row-inline [data-ask]').check();
+  await page.locator('.form-row-inline [data-skill]').fill('dev-gourou');
+  await page.locator('.form-row-inline textarea').fill('is this the right place for it?');
+  await page.locator('.form-row-inline [data-ok]').click();
+  await page.waitForTimeout(800);
+  const log = fs.readFileSync(path.join(out, 'events.log'), 'utf8');
+  const asked = log.match(/^ask (\d+): 1 comment\(s\) - to handle: (.+)$/m);
+  expect('a question leaves at once, on its own', !!asked && fs.existsSync(asked[2]));
+  const askFile = asked ? fs.readFileSync(asked[2], 'utf8') : '';
+  expect('the question names its skill', askFile.includes('through the `dev-gourou` skill'));
+  const askId = (askFile.match(/\*\*(C\d+)\*\*/) || [])[1];
+  expect('the thread waits for Claude', (await page.locator('#thread-' + askId + ' .response.thinking').count()) === 1);
+  await page.click('#global');
+  await page.locator('.form-row-inline textarea').fill('typed while Claude answers');
+  fs.writeFileSync(path.join(out, 'replies', askId + '.json'),
+    JSON.stringify({ comment: askId, verdict: 'answered', response: 'Yes, **keep it** there.' }));
+  await page.waitForTimeout(1500);
+  expect('the answer shows up without a reload',
+    (await page.locator('#thread-' + askId + ' .response.answer .md').innerHTML()) === '<p>Yes, <strong>keep it</strong> there.</p>');
+  expect('the form being typed survives the answer',
+    (await page.locator('.form-row-inline textarea').inputValue()) === 'typed while Claude answers');
+  await page.locator('.form-row-inline [data-cancel]').click();
+
   await page.click('#terminer');
   await page.waitForTimeout(1500);
   expect('review sent', (await page.locator('#state-enreg').innerText()).includes('review sent'));
   expect('TODO.md written', fs.existsSync(path.join(out, 'TODO.md')));
   const todo = fs.readFileSync(path.join(out, 'TODO.md'), 'utf8');
   expect('TODO.md repeats nothing already sent', todo.startsWith('# 1 comment(s) to handle') &&
-    todo.includes('Already sent and not repeated here: batch-1.md.'));
-  expect('a sent comment stays sent after a reload', (await page.locator('.badge-outline', { hasText: /^sent$/ }).count()) === 3);
+    todo.includes('Already sent and not repeated here: batch-1.md, ask-2.md.'));
+  expect('a sent comment stays sent after a reload', (await page.locator('.badge-outline', { hasText: /^sent$/ }).count()) === 4);
   expect('done sentinel written', fs.existsSync(path.join(out, 'done')));
   expect('server.json removed on clean shutdown', !fs.existsSync(path.join(out, 'server.json')));
   expect('no JS error', errors.length === 0);

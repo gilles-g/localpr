@@ -14,6 +14,7 @@ Outputs, under --out (default ~/.claude/reviews/<project>/<timestamp>/):
     findings.json       optional, imported through --findings
     server.json         {url, port, token, pid} in --serve mode
     batch-<n>.md        the comments sent in batch n, the server still running
+    ask-<n>.md          a question put to Claude from a comment, sent on its own and at once
     batches.json        which comment went in which batch
     events.log          one line per batch, then one when the server stops
     TODO.md             the comments not sent in a batch, plus how to handle them
@@ -35,6 +36,8 @@ file re-read on every request: a page rewritten while being served would arrive 
 The page's only setInterval is a 30s presence heartbeat to /ping: it renders nothing and
 overwrites nothing, it exists so the server shuts itself down once the tab is closed. Do not
 mistake it for a refresh, and do not remove it in the name of the paragraph above.
+The same goes for POST /replies, held open by the server while a question to Claude is pending:
+it only rewrites the thread that was answered, never the form being typed.
 """
 
 import argparse
@@ -930,7 +933,9 @@ JS = r"""
     var rep = D.replies[c.id], sev = c.origin ? 'suggestion' : (SEVS[c.type] || 'nitpick');
     var h = '<div class="thread" id="thread-' + esc(c.id) + '"><div class="thread-comment">';
     h += '<div class="comment-head"><span class="who">' + (c.origin ? esc(c.origin.tool) : 'you') + '</span>';
-    h += '<span class="sev-tag" data-sev="' + sev + '">' + esc(LIBS[c.type] || c.type) + '</span>';
+    h += c.ask ? '<span class="sev-tag" data-sev="question">Ask Claude</span>'
+       : '<span class="sev-tag" data-sev="' + sev + '">' + esc(LIBS[c.type] || c.type) + '</span>';
+    if (c.ask && c.ask.skill) h += '<span class="badge-outline">skill ' + esc(c.ask.skill) + '</span>';
     if (c.origin && c.origin.severity) h += '<span class="badge-outline">' + esc(c.origin.severity) + '</span>';
     if (c.origin && c.origin.state === 'dropped') h += '<span class="badge-outline">dropped below threshold</span>';
     if (c.side === 'old') h += '<span class="badge-outline">deleted line</span>';
@@ -939,10 +944,15 @@ JS = r"""
     if (envoyes[c.id]) h += '<span class="badge-outline">sent</span>';
     h += '<span style="margin-left:auto" class="mono">' + esc(c.id) + '</span></div>';
     h += '<div class="comment-body md">' + Render.markdown(c.body) + '</div>';
-    if (rep) {
+    if (rep && rep.verdict === 'answered') {
+      h += '<div class="response answer" style="margin:0 12px 12px"><b>Claude</b>' +
+        '<div class="md">' + Render.markdown(String(rep.response || '')) + '</div></div>';
+    } else if (rep) {
       var ko = rep.verdict && rep.verdict !== 'fixed';
       h += '<div class="response' + (ko ? ' ko' : '') + '" style="margin:0 12px 12px"><b>' +
         esc(rep.verdict) + '</b> — ' + esc(rep.response) + '</div>';
+    } else if (c.ask && envoyes[c.id]) {
+      h += '<div class="response thinking" style="margin:0 12px 12px">Claude is thinking…</div>';
     }
     h += '<div class="thread-actions">';
     // Deleting a sent comment would not reach the agent already handling it.
@@ -1041,8 +1051,13 @@ JS = r"""
         (i === 0 ? ' checked' : '') + '><label for="' + id + '" data-sev="' + SEVS[t] + '">' +
         LIBS[t] + '</label>';
     }).join('');
+    var question = server ? '<div class="form-row ask-row"><label class="ask-toggle">' +
+      '<input type="checkbox" data-ask="1"> Ask Claude now</label>' +
+      '<input class="input" data-skill="1" maxlength="80" disabled' +
+      ' placeholder="through a skill (optional), e.g. dev-gourou"></div>' : '';
     return '<div class="thread"><div class="thread-form">' +
       '<textarea class="input" placeholder="what is wrong, and what to do about it"></textarea>' +
+      question +
       '<div class="form-row"><span class="severity">' + opts + '</span>' +
       '<span class="spacer"></span><span class="diffstat-text" style="font-size:12px">' +
       esc(initial) + '</span>' +
@@ -1061,13 +1076,26 @@ JS = r"""
     formulaire = target.nextElementSibling;
     var zone = formulaire.querySelector('textarea');
     zone.focus();
+    var caseAsk = formulaire.querySelector('[data-ask]'), skill = formulaire.querySelector('[data-skill]');
+    var ok = formulaire.querySelector('[data-ok]');
+    if (caseAsk) caseAsk.addEventListener('change', function () {
+      skill.disabled = !caseAsk.checked;
+      formulaire.querySelector('.severity').classList.toggle('off', caseAsk.checked);
+      ok.textContent = caseAsk.checked ? 'Ask Claude' : 'Submit';
+    });
     formulaire.querySelector('[data-cancel]').addEventListener('click', closeForm);
-    formulaire.querySelector('[data-ok]').addEventListener('click', function () {
+    ok.addEventListener('click', function () {
       var text = zone.value.trim();
       if (!text) { zone.focus(); return }
-      var type = formulaire.querySelector('input[type=radio]:checked').value;
+      var type = formulaire.querySelector('input[type=radio]:checked').value, ask = null;
+      if (caseAsk && caseAsk.checked) {
+        var nom = skill.value.trim();
+        if (nom && !/^[\w.:\/-]{1,80}$/.test(nom)) { skill.focus(); return }
+        ask = { skill: nom || null };
+        type = 'followUp';
+      }
       closeForm();
-      createWith(type, text);
+      createWith(type, text, ask);
     });
     zone.addEventListener('keydown', function (e) {
       if (e.key === 'Escape') closeForm();
@@ -1097,12 +1125,53 @@ JS = r"""
     c.id = 'C' + state.n;
     c.state = 'open';
     c.deposeA = maintenant();
+    if (!c.ask) delete c.ask;
     state.comments.push(c);
-    enregistrer();
+    if (c.ask && server) demander(); else enregistrer();
     rendreFils();
   }
 
-  function creerLigne(section, side, line, type, body) {
+  /* Re-rendering the whole review here would remove the form the reviewer may have opened
+     since the question left. */
+  function majFil(id) {
+    var c = state.comments.filter(function (x) { return x.id === id })[0], fil = $('thread-' + id);
+    if (c && fil) fil.outerHTML = corpsFil(c, lectureSeule(c));
+    majCompteurs();
+  }
+
+  function demander() {
+    state.updated = maintenant();
+    ecrireLocal();
+    majCompteurs();
+    majJson();
+    post('/ask', state).then(function (r) { return r.json() }).then(function (res) {
+      if (!res.batch) return;
+      res.batch.comments.forEach(function (id) { envoyes[id] = 1; majFil(id) });
+      setStatus('question sent to Claude — the answer shows up in its thread', 'praise');
+      attendreReponses();
+    }).catch(function () { switchToFallback('server unreachable - comments kept locally') });
+  }
+
+  var enAttente = false;
+
+  function attendreReponses() {
+    if (enAttente || !server) return;
+    var ids = state.comments.filter(function (c) {
+      return c.ask && envoyes[c.id] && !D.replies[c.id];
+    }).map(function (c) { return c.id });
+    if (!ids.length) return;
+    enAttente = true;
+    post('/replies', { ids: ids }).then(function (r) { return r.json() }).then(function (res) {
+      enAttente = false;
+      Object.keys(res.replies || {}).forEach(function (id) {
+        D.replies[id] = res.replies[id];
+        majFil(id);
+      });
+      attendreReponses();
+    }).catch(function () { enAttente = false });
+  }
+
+  function creerLigne(section, side, line, type, body, ask) {
     var idx = +section.dataset.f, f = D.files[idx], a = fenetre(section, side, line);
     ajouter({
       scope: 'line', type: type, side: side,
@@ -1110,7 +1179,7 @@ JS = r"""
       line: +line, lineEnd: null,
       hunk: a.hunk,
       anchor: a.anchor, anchorOffset: a.offset, fingerprint: f.fingerprint,
-      body: body, origin: null
+      body: body, origin: null, ask: ask
     });
   }
 
@@ -1323,11 +1392,11 @@ JS = r"""
       var sec = cf.closest('.file-diff');
       sec.classList.remove('collapsed');
       preparer(sec);
-      openForm(sec.querySelector('.file-diff-head'), false, function (t, body) {
+      openForm(sec.querySelector('.file-diff-head'), false, function (t, body, ask) {
         var idx = +sec.dataset.f;
         ajouter({ scope: 'file', type: t, side: 'new', file: D.files[idx].path,
                   fichier_index: idx, line: null, lineEnd: null, anchor: null, anchorOffset: null,
-                  fingerprint: D.files[idx].fingerprint, body: body, origin: null });
+                  fingerprint: D.files[idx].fingerprint, body: body, origin: null, ask: ask });
       }, 'comment on ' + sec.dataset.path);
       return;
     }
@@ -1339,8 +1408,8 @@ JS = r"""
       if (!cellule) return;
       var section = cellule.closest('.file-diff');
       var side = cellule.dataset.side, line = cellule.dataset.line;
-      openForm(cellule.parentNode, true, function (t, body) {
-        creerLigne(section, side, line, t, body);
+      openForm(cellule.parentNode, true, function (t, body, ask) {
+        creerLigne(section, side, line, t, body, ask);
       }, side === 'old' ? 'deleted line ' + line + ' - not re-anchorable, the hunk travels with it'
                         : 'line ' + line + ' of the new file');
     }
@@ -1410,10 +1479,10 @@ JS = r"""
   });
 
   $('global').addEventListener('click', function () {
-    openForm($('globaux'), false, function (t, body) {
+    openForm($('globaux'), false, function (t, body, ask) {
       ajouter({ scope: 'global', type: t, side: null, file: null, fichier_index: null,
                 line: null, lineEnd: null, anchor: null, anchorOffset: null, fingerprint: null,
-                body: body, origin: null });
+                body: body, origin: null, ask: ask });
     }, 'global-scope comment, handled separately');
   });
 
@@ -1510,7 +1579,7 @@ JS = r"""
 
   function heartbeat() {
     if (!server) return;
-    post('/ping', {}).catch(function () {
+    post('/ping', {}).then(attendreReponses).catch(function () {
       switchToFallback('server stopped - comments kept locally');
     });
   }
@@ -1521,6 +1590,7 @@ JS = r"""
     setStatus('saved on the server', 'praise');
     $('fallback').hidden = true;
     if (state.updated && instant(state.updated) > instant(D.comments && D.comments.updated)) enregistrer();
+    attendreReponses();
   }).catch(function () {
     switchToFallback(D.token ? 'server unreachable - comments kept locally'
                              : 'page opened without a server - comments kept locally');
@@ -2077,18 +2147,30 @@ def write_prefs(prefs):
 COMMENT_KEYS = {
     "id", "scope", "type", "side", "file", "fichier_index", "line", "lineEnd",
     "hunk", "anchor", "anchorOffset", "fingerprint", "body", "origin", "state", "deposeA",
-    "reprisDe",
+    "reprisDe", "ask",
 }
 COMMENT_ID = re.compile(r"^[CF]\d{1,6}$")
 FIELD_TYPES = {
     "file": str, "state": str, "deposeA": str, "reprisDe": str,
-    "anchor": str, "hunk": str, "fingerprint": str, "origin": dict,
+    "anchor": str, "hunk": str, "fingerprint": str, "origin": dict, "ask": dict,
     "fichier_index": int, "line": int, "lineEnd": int, "anchorOffset": int,
 }
 SCOPES = {"line", "range", "file", "global"}
 TYPES = {"fix", "followUp", "workflowNote"}
 MAX_BODY = 8000
 MAX_COMMENTS = 500
+SKILL = re.compile(r"^[\w.:/-]{1,80}$", re.ASCII)
+REPLY_WAIT = 25
+REPLY_STEP = 0.5
+
+
+def awaited_ids(raw):
+    ids = raw.get("ids") if isinstance(raw, dict) else None
+    if not isinstance(ids, list) or len(ids) > MAX_COMMENTS:
+        raise ValueError("ids: list expected")
+    if not all(isinstance(i, str) and COMMENT_ID.match(i) for i in ids):
+        raise ValueError("invalid id")
+    return set(ids)
 
 
 def sanitize_state(raw):
@@ -2132,6 +2214,11 @@ def sanitize_state(raw):
         if isinstance(anchor, str) and offset is not None and \
                 not 0 <= offset < len(anchor.split("\n")):
             raise ValueError(f"anchorOffset out of range on {cid}")
+        ask = e.get("ask")
+        if ask is not None and (set(ask) - {"skill"} or not (
+                ask.get("skill") is None
+                or isinstance(ask["skill"], str) and SKILL.match(ask["skill"]))):
+            raise ValueError(f"invalid ask on {cid}")
         propres.append({k: v for k, v in e.items() if k in COMMENT_KEYS})
     return {
         "version": MODEL_VERSION,
@@ -2198,15 +2285,37 @@ class Review:
             nouveaux = self.non_envoyes(state)
             if not nouveaux:
                 return None
-            n = len(self.lots) + 1
-            todo = self.out / f"batch-{n}.md"
-            write_todo(self, state, nouveaux, todo, FINISH_BATCH)
-            self.lots.append({"n": n, "at": state["updated"], "todo": str(todo),
-                              "comments": [c["id"] for c in nouveaux]})
-            write_atomic(self.out / "batches.json",
-                         json.dumps(self.lots, ensure_ascii=False, indent=2))
-            self.signaler(f"batch {n}: {len(nouveaux)} comment(s) - to handle: {todo}")
-            return self.lots[-1]
+            return self.consigner(state, nouveaux, "batch", PROTOCOL, FINISH_BATCH)
+
+    def demander(self, state):
+        """Only the questions leave: the rest of the review waits for its own batch."""
+        with self.verrou:
+            questions = [c for c in self.non_envoyes(state) if c.get("ask") is not None]
+            if not questions:
+                return None
+            return self.consigner(state, questions, "ask", ASK_PROTOCOL, "")
+
+    def consigner(self, state, entrees, nature, protocole, fin):
+        n = len(self.lots) + 1
+        todo = self.out / f"{nature}-{n}.md"
+        write_todo(self, state, entrees, todo, fin, protocole=protocole)
+        self.lots.append({"n": n, "at": state["updated"], "todo": str(todo),
+                          "comments": [c["id"] for c in entrees]})
+        write_atomic(self.out / "batches.json",
+                     json.dumps(self.lots, ensure_ascii=False, indent=2))
+        self.signaler(f"{nature} {n}: {len(entrees)} comment(s) - to handle: {todo}")
+        return self.lots[-1]
+
+    def attendre_reponses(self, ids):
+        """Held open rather than polled from the page: a second timer there would be one more
+        thing to mistake for a refresh."""
+        fin = time.time() + REPLY_WAIT
+        while True:
+            trouvees = {cid: r for cid, r in load_replies(self.out / "replies").items()
+                        if cid in ids}
+            if trouvees or time.time() >= fin:
+                return trouvees
+            time.sleep(REPLY_STEP)
 
     def terminer(self, state):
         with self.verrou:
@@ -2233,17 +2342,7 @@ def sent_ids(lots):
             for cid in lot.get("comments") or [] if isinstance(cid, str)]
 
 
-PROTOCOL = """
-## How to handle these comments
-
-**The three types are not handled the same way.**
-
-| type | what to do with it |
-|---|---|
-| `fix` | applied to the code |
-| `followUp` | **nothing is written**: only reported back at hand-off |
-| `workflowNote` | reported back as a lesson about the way of working, never to the code |
-
+ANCHORING = """
 **Finding the line again.** The anchor is not a line number but a *window*: the commented line
 plus/minus 2 lines, with `anchorOffset` giving the index of the target line inside that window. An
 isolated line (`    }`, `    return $this;`, a blank line) occurs dozens of times in a file:
@@ -2258,7 +2357,19 @@ searching for it alone yields a silent false positive.
 3. `side: "old"` -> the comment targets a **deleted** line: it no longer exists in the working
    tree, there is nothing to re-anchor. The `hunk` field carries the context.
 4. No candidate -> verdict `anchor-lost`. Do not guess.
+"""
 
+PROTOCOL = """
+## How to handle these comments
+
+**The three types are not handled the same way.**
+
+| type | what to do with it |
+|---|---|
+| `fix` | applied to the code |
+| `followUp` | **nothing is written**: only reported back at hand-off |
+| `workflowNote` | reported back as a lesson about the way of working, never to the code |
+""" + ANCHORING + """
 **A comment's blast radius is not its file.** Deleting a comment, a rename, a move stay local and
 can be handled in parallel. A change to a **business rule** has an unknown radius: it breaks tests
 elsewhere. Observed case - removing one piece of information from a completeness calculation broke
@@ -2282,6 +2393,26 @@ of obedience is a failure. The page shows the reply under its thread on the next
 be read, and the developer commits.
 """
 
+ASK_PROTOCOL = """
+## How to answer
+
+**These are questions, asked while the developer is still reading: answer them, do not change the
+code.** Asked for a change, say what you would do and why; if they agree, it comes back as a regular
+comment. Disagreeing is an answer too.
+
+A question naming a skill is answered **through that skill**: invoke it first. A skill that does not
+exist is said so in the answer, never silently replaced.
+""" + ANCHORING + """
+**Write the answer as soon as it is ready**, one file per question, in `replies/<id>.json`: the page
+is waiting on that file and shows it in the thread the moment it lands.
+
+```json
+{ "comment": "C4", "verdict": "answered", "response": "the answer, in markdown" }
+```
+
+**Do not regenerate the page and do not stop the server**: the review goes on.
+"""
+
 FINISH_REVIEW = """
 **To finish**: replay the project's own check (`grep -E '^[a-z-]+:' Makefile`, typically
 `make quality` then the tests) and never claim green without the command's output. Then regenerate
@@ -2300,7 +2431,7 @@ sent.
 """
 
 
-def write_todo(review, state, entrees, cible, fin, note=None):
+def write_todo(review, state, entrees, cible, fin, note=None, protocole=PROTOCOL):
     """The instructions travel with the data.
 
     Knowledge filed away in a skill only loads if someone invokes it; placed here, it arrives with
@@ -2330,6 +2461,10 @@ def write_todo(review, state, entrees, cible, fin, note=None):
                 place.append(c["fingerprint"])
             lines.append(f"- **{c.get('id')}** [{c.get('type')}] — {', '.join(place)}")
             lines.append(f"  > {(c.get('body') or '').strip()}")
+            if c.get("ask") is not None:
+                skill = c["ask"].get("skill")
+                lines.append("  question - answer it, do not change the code"
+                             + (f", through the `{skill}` skill" if skill else ""))
             if c.get("origin"):
                 lines.append(f"  (taken from a {c['origin'].get('tool')} finding, "
                               f"severity {c['origin'].get('severity')})")
@@ -2339,7 +2474,7 @@ def write_todo(review, state, entrees, cible, fin, note=None):
                 lines.append(f"  anchor: `{extrait.strip()}`")
         lines.append("")
 
-    lines += [PROTOCOL.strip(), "", fin.strip()]
+    lines += [protocole.strip(), "", fin.strip()]
     write_atomic(cible, "\n".join(lines) + "\n")
 
 
@@ -2427,14 +2562,23 @@ def make_handler(review, stop):
                 t = review.regenerer()["totals"]
                 return self.repondre(200, json.dumps({"ok": True, "totals": t}).encode("utf-8"))
 
-            if self.path in ("/comments", "/batch", "/done"):
+            if self.path == "/replies":
+                try:
+                    ids = awaited_ids(json.loads(raw.decode("utf-8", errors="replace")))
+                except (ValueError, UnicodeError) as e:
+                    return self.refuser(400, f"ids refused: {e}")
+                return self.repondre(200, json.dumps(
+                    {"replies": review.attendre_reponses(ids)}, ensure_ascii=False).encode("utf-8"))
+
+            if self.path in ("/comments", "/batch", "/ask", "/done"):
                 try:
                     state = sanitize_state(json.loads(raw.decode("utf-8", errors="replace")))
                 except (ValueError, UnicodeError) as e:
                     return self.refuser(400, f"state refused: {e}")
                 write_atomic(review.out / "comments.json",
                                 json.dumps(state, ensure_ascii=False, indent=2))
-                lot = review.envoyer_lot(state) if self.path == "/batch" else None
+                lot = (review.envoyer_lot(state) if self.path == "/batch"
+                       else review.demander(state) if self.path == "/ask" else None)
                 review.rendre()
                 if self.path == "/done":
                     review.terminer(state)

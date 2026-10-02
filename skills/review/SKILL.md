@@ -26,6 +26,8 @@ State these two points, one line each, because neither is guessable:
   review goes on while they are handled, and `↻` shows the replies. **Finish review** hands over
   the rest, writes a `TODO.md` and **shuts the server down**. Without that click, the server stops
   on its own 5 minutes after the tab is closed, and in any case after an hour.
+- **Ask Claude now**, ticked in a comment (optionally naming a skill), sends that comment alone, at
+  once: the answer shows up in its thread without `↻`.
 
 Then arm a **Monitor** on the output directory's event log, and nothing else — no polling, no
 relaunch. This is a human review and it takes as long as it takes:
@@ -40,6 +42,9 @@ is an event:
 - `batch <n>: … - to handle: <path>` — read that `batch-<n>.md` and handle it now: it carries the
   comments grouped by file **and** the protocol for handling them. The developer is still reading;
   leave the page and the server alone.
+- `ask <n>: … - to handle: <path>` — the developer is **waiting on screen**: drop everything else,
+  read that `ask-<n>.md` and write each answer to `replies/<id>.json` as it is ready. Answer, do not
+  change the code; a named skill is invoked first.
 - `done: … - to handle: <path>` — read `TODO.md`, the comments no batch carried; stop the monitor.
 - `stopped: …` — the server died without *Finish review*; stop the monitor and say so.
 

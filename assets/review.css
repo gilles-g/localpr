@@ -887,6 +887,35 @@ tr.has-thread .line-num {
 .thread-comment .response.ko b {
   color: var(--danger-fg);
 }
+.thread-comment .response.answer b {
+  color: var(--done-fg);
+}
+.thread-comment .response.answer .md > *:last-child {
+  margin-bottom: 0;
+}
+.thread-comment .response.thinking {
+  color: var(--fg-muted);
+  font-style: italic;
+}
+.ask-row .ask-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ask-row .input {
+  flex: 1;
+  min-width: 180px;
+  max-width: 360px;
+  padding: 3px 8px;
+  font-size: 12px;
+}
+.severity.off {
+  opacity: 0.4;
+  pointer-events: none;
+}
 .thread-actions {
   display: flex;
   gap: 12px;

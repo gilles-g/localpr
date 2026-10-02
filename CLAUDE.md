@@ -194,20 +194,25 @@ They are stated in the module docstring, and read like bugs to anyone who does n
   the only mutable state on the page belongs to the reviewer; a refresh would destroy the comment
   being typed. The **Regenerate** button is the way to re-collect a diff.
 - the page's only `setInterval` is a 30 s **presence heartbeat** to `/ping`: it renders nothing, it
-  exists so the server shuts itself down once the tab is closed. It is not a refresh.
+  exists so the server shuts itself down once the tab is closed. It is not a refresh, and neither
+  is the held `POST /replies`: it only rewrites the thread that was answered.
 
 ### Local server
 
 Ephemeral port on `127.0.0.1`, mandatory token (`?t=` query on GET, `X-Localpr-Token` header on POST),
 `Host` **and** `Origin` checked (DNS rebinding), `OPTIONS` always answers 403 — the absence of a CORS
 header makes the preflight a third-party page would trigger fail — body capped at `MAX_PAYLOAD`.
-Routes: `GET /review.html`, then `POST` on `/ping`, `/prefs`, `/regenerate`, `/comments`, `/batch`
-and `/done`. `/batch` is *Send comments*: the comments no earlier batch carried go to
+Routes: `GET /review.html`, then `POST` on `/ping`, `/prefs`, `/regenerate`, `/comments`, `/batch`,
+`/ask`, `/replies` and `/done`. `/batch` is *Send comments*: the comments no earlier batch carried go to
 `batch-<n>.md`, their ids to `batches.json` (`Review.lots`, under a lock), and the server keeps
 running; `/done` only writes into `TODO.md` what no batch carried. The agent learns of a batch
-through `events.log` (`Review.signaler`: `batch …`, `done: …`, `stopped: …`), which the skill tails
+through `events.log` (`Review.signaler`: `batch …`, `ask …`, `done: …`, `stopped: …`), which the skill tails
 with a Monitor — stdout of a background server is nothing it can wait on. A sent comment loses
-its delete button: a deletion would never reach the agent already handling it. Three shutdown paths: *Finish review*, `SILENCE_MAX` (300 s) with no request at all, `--max-minutes`
+its delete button: a deletion would never reach the agent already handling it. A comment
+carrying `ask` (*Ask Claude now*, optional `skill`) goes alone through `/ask` to `ask-<n>.md`,
+numbered with the batches and under `ASK_PROTOCOL` (answer, never touch the code, verdict
+`answered`); the page then holds `POST /replies` open — `REPLY_WAIT`, re-sent until answered — and
+rewrites that one thread with `majFil`, never `rendreFils`, which would drop an open form. Three shutdown paths: *Finish review*, `SILENCE_MAX` (300 s) with no request at all, `--max-minutes`
 (60 by default). `server.json` is deleted on clean shutdown: a `server.json` with no live process is
 the record of a server that was killed, not of one that is running. A live pid proves nothing
 either — the number goes to the next process to start — so `live_servers` only calls a server
@@ -218,7 +223,7 @@ anything else.
 
 - **Python and the embedded JS share keys, and nothing checks it.** A comment's type
   (`fix` / `followUp` / `workflowNote`), a reply's `verdict`
-  (`fixed` / `refused` / `out-of-scope` / `anchor-lost`), a finding's `origin.state`
+  (`fixed` / `refused` / `out-of-scope` / `anchor-lost` / `answered`), a finding's `origin.state`
   (`applied` / `dropped`) and a pref's `theme` (`auto` / `light` / `dark` / `dimmed`, in `THEMES`,
   in the toolbar's `<option>` values and in the CSS selectors) are produced on the Python side and
   **compared as literals inside the `JS` string** of the same file. A divergence breaks nothing: it silently degrades the rendering
@@ -256,7 +261,7 @@ anything else.
 ## Still undecided
 
 `claude plugin validate --strict` passes: MIT `LICENSE`, `author` in `plugin.json` (name + GitHub
-URL, no email), and the two version fields aligned on `0.6.1` — `plugin.json` wins at install time.
+URL, no email), and the two version fields aligned on `0.7.0` — `plugin.json` wins at install time.
 The install snippet points at `gilles-g/localpr`, the repository's own remote.
 
 The `marketplace.json` entry **follows `main`**: its `source` is `./`, no tag, no `ref`. Whatever
