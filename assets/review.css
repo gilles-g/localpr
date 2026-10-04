@@ -897,6 +897,9 @@ tr.has-thread .line-num {
   color: var(--fg-muted);
   font-style: italic;
 }
+.thread-reply {
+  border-top: 1px solid var(--border-default);
+}
 .ask-row .ask-toggle {
   display: inline-flex;
   align-items: center;

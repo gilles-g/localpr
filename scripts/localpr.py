@@ -929,18 +929,41 @@ JS = r"""
     majProgres();
   }
 
+  function trouver(id) {
+    return state.comments.filter(function (x) { return x.id === id })[0];
+  }
+
+  function suitesDe(c) {
+    return state.comments.filter(function (x) { return x.inReplyTo === c.id });
+  }
+
   function corpsFil(c, readonly) {
-    var rep = D.replies[c.id], sev = c.origin ? 'suggestion' : (SEVS[c.type] || 'nitpick');
+    var suites = readonly ? [] : suitesDe(c);
     var h = '<div class="thread" id="thread-' + esc(c.id) + '"><div class="thread-comment">';
-    h += '<div class="comment-head"><span class="who">' + (c.origin ? esc(c.origin.tool) : 'you') + '</span>';
+    h += message(c, readonly, suites.length > 0);
+    suites.forEach(function (s) {
+      h += '<div class="thread-reply" id="comment-' + esc(s.id) + '">' + message(s, false, false) + '</div>';
+    });
+    if (!readonly && envoyes[c.id]) {
+      h += '<div class="thread-actions"><button data-reply="' + esc(c.id) + '">Reply</button></div>';
+    }
+    h += '</div></div>';
+    return h;
+  }
+
+  function message(c, readonly, suivi) {
+    var rep = D.replies[c.id], sev = c.origin ? 'suggestion' : (SEVS[c.type] || 'nitpick');
+    var h = '<div class="comment-head"><span class="who">' + (c.origin ? esc(c.origin.tool) : 'you') + '</span>';
     h += c.ask ? '<span class="sev-tag" data-sev="question">Ask Claude</span>'
        : '<span class="sev-tag" data-sev="' + sev + '">' + esc(LIBS[c.type] || c.type) + '</span>';
     if (c.ask && c.ask.skill) h += '<span class="badge-outline">skill ' + esc(c.ask.skill) + '</span>';
     if (c.origin && c.origin.severity) h += '<span class="badge-outline">' + esc(c.origin.severity) + '</span>';
     if (c.origin && c.origin.state === 'dropped') h += '<span class="badge-outline">dropped below threshold</span>';
-    if (c.side === 'old') h += '<span class="badge-outline">deleted line</span>';
-    if (c.scope === 'file') h += '<span class="badge-outline">whole file</span>';
-    if (c.scope === 'global') h += '<span class="badge-outline">global scope</span>';
+    if (!c.inReplyTo) {
+      if (c.side === 'old') h += '<span class="badge-outline">deleted line</span>';
+      if (c.scope === 'file') h += '<span class="badge-outline">whole file</span>';
+      if (c.scope === 'global') h += '<span class="badge-outline">global scope</span>';
+    }
     if (envoyes[c.id]) h += '<span class="badge-outline">sent</span>';
     h += '<span style="margin-left:auto" class="mono">' + esc(c.id) + '</span></div>';
     h += '<div class="comment-body md">' + Render.markdown(c.body) + '</div>';
@@ -954,11 +977,11 @@ JS = r"""
     } else if (c.ask && envoyes[c.id]) {
       h += '<div class="response thinking" style="margin:0 12px 12px">Claude is thinking…</div>';
     }
-    h += '<div class="thread-actions">';
-    // Deleting a sent comment would not reach the agent already handling it.
-    h += readonly ? '<button data-rep="' + esc(c.id) + '">take up this finding</button>'
-       : envoyes[c.id] ? '' : '<button data-sup="' + esc(c.id) + '">delete</button>';
-    h += '</div></div></div>';
+    // Deleting a sent comment would not reach the agent already handling it, and deleting a
+    // replied-to one would orphan its replies.
+    var action = readonly ? '<button data-rep="' + esc(c.id) + '">take up this finding</button>'
+       : envoyes[c.id] || suivi ? '' : '<button data-sup="' + esc(c.id) + '">delete</button>';
+    if (action) h += '<div class="thread-actions">' + action + '</div>';
     return h;
   }
 
@@ -981,7 +1004,8 @@ JS = r"""
   function affiches() {
     var repris = {};
     state.comments.forEach(function (c) { if (c.reprisDe) repris[c.reprisDe] = 1 });
-    return state.comments.concat(D.findings.filter(function (f) { return !repris[f.id] }));
+    return state.comments.filter(function (c) { return !c.inReplyTo })
+      .concat(D.findings.filter(function (f) { return !repris[f.id] }));
   }
 
   function insererFil(section, c) {
@@ -1065,7 +1089,7 @@ JS = r"""
       '<button class="btn btn-sm btn-primary" data-ok="1">Submit</button></div></div></div>';
   }
 
-  function openForm(target, inTable, createWith, initial) {
+  function openForm(target, inTable, createWith, initial, ask) {
     closeForm();
     cacherAjout();
     var cols = inTable ? colonnes(target.closest('.file-diff')) : 0;
@@ -1083,6 +1107,11 @@ JS = r"""
       formulaire.querySelector('.severity').classList.toggle('off', caseAsk.checked);
       ok.textContent = caseAsk.checked ? 'Ask Claude' : 'Submit';
     });
+    if (caseAsk && ask) {
+      caseAsk.checked = true;
+      skill.value = ask.skill || '';
+      caseAsk.dispatchEvent(new Event('change'));
+    }
     formulaire.querySelector('[data-cancel]').addEventListener('click', closeForm);
     ok.addEventListener('click', function () {
       var text = zone.value.trim();
@@ -1134,9 +1163,20 @@ JS = r"""
   /* Re-rendering the whole review here would remove the form the reviewer may have opened
      since the question left. */
   function majFil(id) {
-    var c = state.comments.filter(function (x) { return x.id === id })[0], fil = $('thread-' + id);
-    if (c && fil) fil.outerHTML = corpsFil(c, lectureSeule(c));
+    var c = trouver(id);
+    if (c && c.inReplyTo) c = trouver(c.inReplyTo);
+    var fil = c && $('thread-' + c.id);
+    if (fil) fil.outerHTML = corpsFil(c, lectureSeule(c));
     majCompteurs();
+  }
+
+  /* A reply carries its thread's anchor: the agent handling it gets the place without having to
+     resolve the thread first. */
+  function repondre(racine, type, body, ask) {
+    var c = { type: type, body: body, origin: null, ask: ask, inReplyTo: racine.id };
+    ['scope', 'side', 'file', 'fichier_index', 'line', 'lineEnd', 'hunk', 'anchor', 'anchorOffset',
+     'fingerprint'].forEach(function (k) { c[k] = racine[k] === undefined ? null : racine[k] });
+    ajouter(c);
   }
 
   function demander() {
@@ -1360,7 +1400,8 @@ JS = r"""
     var vers = e.target.closest('[data-goto]');
     if (vers) {
       poseOnglet('files');
-      var fil = $('thread-' + vers.dataset.goto);
+      var visee = trouver(vers.dataset.goto);
+      var fil = $('thread-' + (visee && visee.inReplyTo || vers.dataset.goto));
       if (fil) {
         var sec = fil.closest('.file-diff');
         if (sec) { sec.classList.remove('collapsed'); preparer(sec) }
@@ -1373,6 +1414,18 @@ JS = r"""
     if (sup) {
       state.comments = state.comments.filter(function (c) { return c.id !== sup.dataset.sup });
       enregistrer(); rendreFils(); return;
+    }
+
+    var reponse = e.target.closest('[data-reply]');
+    if (reponse) {
+      var racine = trouver(reponse.dataset.reply), fil = $('thread-' + reponse.dataset.reply);
+      if (!racine || !fil) return;
+      var fils = [racine].concat(suitesDe(racine)), dernier = fils[fils.length - 1];
+      var ligne = fil.closest('tr');
+      openForm(ligne || fil, !!ligne, function (t, body, ask) {
+        repondre(racine, t, body, ask);
+      }, 'reply to ' + racine.id, dernier.ask);
+      return;
     }
 
     var rep = e.target.closest('[data-rep]');
@@ -2147,11 +2200,11 @@ def write_prefs(prefs):
 COMMENT_KEYS = {
     "id", "scope", "type", "side", "file", "fichier_index", "line", "lineEnd",
     "hunk", "anchor", "anchorOffset", "fingerprint", "body", "origin", "state", "deposeA",
-    "reprisDe", "ask",
+    "reprisDe", "ask", "inReplyTo",
 }
 COMMENT_ID = re.compile(r"^[CF]\d{1,6}$")
 FIELD_TYPES = {
-    "file": str, "state": str, "deposeA": str, "reprisDe": str,
+    "file": str, "state": str, "deposeA": str, "reprisDe": str, "inReplyTo": str,
     "anchor": str, "hunk": str, "fingerprint": str, "origin": dict, "ask": dict,
     "fichier_index": int, "line": int, "lineEnd": int, "anchorOffset": int,
 }
@@ -2220,6 +2273,11 @@ def sanitize_state(raw):
                 or isinstance(ask["skill"], str) and SKILL.match(ask["skill"]))):
             raise ValueError(f"invalid ask on {cid}")
         propres.append({k: v for k, v in e.items() if k in COMMENT_KEYS})
+    # write_todo rebuilds a reply's thread from it: a dangling or nested target loses the context.
+    racines = {c["id"] for c in propres if c.get("inReplyTo") is None}
+    for c in propres:
+        if c.get("inReplyTo") is not None and c["inReplyTo"] not in racines:
+            raise ValueError(f"inReplyTo on {c['id']}: no such thread")
     return {
         "version": MODEL_VERSION,
         "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -2377,6 +2435,10 @@ a test in another file, which built its "incomplete" case precisely on that info
 confined to a single file would have reported "fixed" and left the suite red. Those comments are
 handled with the right to follow their tests.
 
+**A comment written in reply carries its thread so far.** The comment is what gets handled; the
+thread is its context - typically "do what you suggested" after an answer, which names no change by
+itself.
+
 **Reply to every comment**, one file per comment, in `replies/<id>.json`:
 
 ```json
@@ -2402,6 +2464,9 @@ comment. Disagreeing is an answer too.
 
 A question naming a skill is answered **through that skill**: invoke it first. A skill that does not
 exist is said so in the answer, never silently replaced.
+
+A question asked in reply carries its thread so far: answer its last message in that context, and
+do not repeat what was already said.
 """ + ANCHORING + """
 **Write the answer as soon as it is ready**, one file per question, in `replies/<id>.json`: the page
 is waiting on that file and shows it in the thread the moment it lands.
@@ -2431,6 +2496,24 @@ sent.
 """
 
 
+def quoted(text, indent):
+    return [f"{indent}> {line}".rstrip() for line in str(text).strip().split("\n")]
+
+
+def thread_so_far(state, replies, c):
+    racine = c["inReplyTo"]
+    fil = [x for x in state["comments"] if racine in (x["id"], x.get("inReplyTo"))]
+    lines = [f"  in reply to **{racine}**, the thread so far:"]
+    for x in fil[:fil.index(c)]:
+        lines.append(f"    - **{x['id']}**, the developer" + (" (question)" if x.get("ask") else ""))
+        lines += quoted(x.get("body") or "", "      ")
+        rep = replies.get(x["id"])
+        if rep:
+            lines.append(f"    - Claude's reply, `{rep.get('verdict')}`")
+            lines += quoted(rep.get("response") or "", "      ")
+    return lines
+
+
 def write_todo(review, state, entrees, cible, fin, note=None, protocole=PROTOCOL):
     """The instructions travel with the data.
 
@@ -2443,6 +2526,7 @@ def write_todo(review, state, entrees, cible, fin, note=None, protocole=PROTOCOL
     if note:
         lines += [note, ""]
 
+    replies = load_replies(review.out / "replies")
     par_fichier = {}
     for c in entrees:
         par_fichier.setdefault(c.get("file") or "(global scope)", []).append(c)
@@ -2465,6 +2549,8 @@ def write_todo(review, state, entrees, cible, fin, note=None, protocole=PROTOCOL
                 skill = c["ask"].get("skill")
                 lines.append("  question - answer it, do not change the code"
                              + (f", through the `{skill}` skill" if skill else ""))
+            if c.get("inReplyTo"):
+                lines += thread_so_far(state, replies, c)
             if c.get("origin"):
                 lines.append(f"  (taken from a {c['origin'].get('tool')} finding, "
                               f"severity {c['origin'].get('severity')})")

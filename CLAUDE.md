@@ -212,7 +212,11 @@ its delete button: a deletion would never reach the agent already handling it. A
 carrying `ask` (*Ask Claude now*, optional `skill`) goes alone through `/ask` to `ask-<n>.md`,
 numbered with the batches and under `ASK_PROTOCOL` (answer, never touch the code, verdict
 `answered`); the page then holds `POST /replies` open — `REPLY_WAIT`, re-sent until answered — and
-rewrites that one thread with `majFil`, never `rendreFils`, which would drop an open form. Three shutdown paths: *Finish review*, `SILENCE_MAX` (300 s) with no request at all, `--max-minutes`
+rewrites that one thread with `majFil`, never `rendreFils`, which would drop an open form. *Reply*,
+under a sent thread, adds a comment carrying `inReplyTo` — always the thread's **root**, which
+`sanitize_state` enforces — and a copy of the root's anchor; asked or plain, it travels like any
+comment, and `thread_so_far` writes the thread before it into its `.md`: "do what you suggested"
+means nothing without it. A replied-to comment loses its delete button too. Three shutdown paths: *Finish review*, `SILENCE_MAX` (300 s) with no request at all, `--max-minutes`
 (60 by default). `server.json` is deleted on clean shutdown: a `server.json` with no live process is
 the record of a server that was killed, not of one that is running. A live pid proves nothing
 either — the number goes to the next process to start — so `live_servers` only calls a server
@@ -261,7 +265,7 @@ anything else.
 ## Still undecided
 
 `claude plugin validate --strict` passes: MIT `LICENSE`, `author` in `plugin.json` (name + GitHub
-URL, no email), and the two version fields aligned on `0.7.0` — `plugin.json` wins at install time.
+URL, no email), and the two version fields aligned on `0.8.0` — `plugin.json` wins at install time.
 The install snippet points at `gilles-g/localpr`, the repository's own remote.
 
 The `marketplace.json` entry **follows `main`**: its `source` is `./`, no tag, no `ref`. Whatever

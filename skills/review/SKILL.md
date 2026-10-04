@@ -27,7 +27,8 @@ State these two points, one line each, because neither is guessable:
   the rest, writes a `TODO.md` and **shuts the server down**. Without that click, the server stops
   on its own 5 minutes after the tab is closed, and in any case after an hour.
 - **Ask Claude now**, ticked in a comment (optionally naming a skill), sends that comment alone, at
-  once: the answer shows up in its thread without `↻`.
+  once: the answer shows up in its thread without `↻`. **Reply**, under a sent thread, follows it
+  up — asked again at once, or as a plain comment that waits for the next batch.
 
 Then arm a **Monitor** on the output directory's event log, and nothing else — no polling, no
 relaunch. This is a human review and it takes as long as it takes:

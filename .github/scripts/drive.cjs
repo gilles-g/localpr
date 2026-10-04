@@ -138,14 +138,46 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
     (await page.locator('.form-row-inline textarea').inputValue()) === 'typed while Claude answers');
   await page.locator('.form-row-inline [data-cancel]').click();
 
+  const fil = page.locator('#thread-' + askId);
+  await fil.locator('[data-reply]').click();
+  expect('a reply to a question asks Claude again, through the same skill',
+    (await page.locator('.form-row-inline [data-ask]').isChecked()) &&
+    (await page.locator('.form-row-inline [data-skill]').inputValue()) === 'dev-gourou');
+  await page.locator('.form-row-inline textarea').fill('and in the other bounded context?');
+  await page.locator('.form-row-inline [data-ok]').click();
+  await page.waitForTimeout(800);
+  const relance = fs.readFileSync(path.join(out, 'events.log'), 'utf8').match(/^ask (\d+): 1 comment\(s\) - to handle: (.+)$/gm);
+  const relanceFile = relance && relance.length === 2 ? fs.readFileSync(relance[1].split('to handle: ')[1], 'utf8') : '';
+  const relanceId = (relanceFile.match(/^- \*\*(C\d+)\*\*/m) || [])[1];
+  expect('the follow-up question carries the thread so far',
+    relanceFile.includes(`in reply to **${askId}**`) && relanceFile.includes('> Yes, **keep it** there.'));
+  expect('the follow-up sits in the same thread', (await fil.locator('#comment-' + relanceId + ' .response.thinking').count()) === 1);
+  fs.writeFileSync(path.join(out, 'replies', relanceId + '.json'),
+    JSON.stringify({ comment: relanceId, verdict: 'answered', response: 'Same answer there.' }));
+  await page.waitForTimeout(1500);
+  expect('the follow-up answer shows up in the thread',
+    (await fil.locator('#comment-' + relanceId + ' .response.answer .md').innerText()) === 'Same answer there.');
+
+  await fil.locator('[data-reply]').click();
+  await page.locator('.form-row-inline [data-ask]').uncheck();
+  await page.locator('.form-row-inline label[data-sev="blocking"]').click();
+  await page.locator('.form-row-inline textarea').fill('do what you suggested');
+  await page.locator('.form-row-inline [data-ok]').click();
+  await page.waitForTimeout(600);
+  expect('a plain reply waits for the next batch', (await page.locator('#envoyer').innerText()) === 'Send 2 comment(s)' &&
+    (await fil.locator('.thread-reply').count()) === 2);
+
   await page.click('#terminer');
   await page.waitForTimeout(1500);
   expect('review sent', (await page.locator('#state-enreg').innerText()).includes('review sent'));
   expect('TODO.md written', fs.existsSync(path.join(out, 'TODO.md')));
   const todo = fs.readFileSync(path.join(out, 'TODO.md'), 'utf8');
-  expect('TODO.md repeats nothing already sent', todo.startsWith('# 1 comment(s) to handle') &&
-    todo.includes('Already sent and not repeated here: batch-1.md, ask-2.md.'));
-  expect('a sent comment stays sent after a reload', (await page.locator('.badge-outline', { hasText: /^sent$/ }).count()) === 4);
+  expect('TODO.md repeats nothing already sent', todo.startsWith('# 2 comment(s) to handle') &&
+    todo.includes('Already sent and not repeated here: batch-1.md, ask-2.md, ask-3.md.'));
+  expect('a plain reply reaches TODO.md with its thread',
+    todo.includes('> do what you suggested') && todo.includes(`in reply to **${askId}**`) &&
+    todo.includes('> Same answer there.'));
+  expect('a sent comment stays sent after a reload', (await page.locator('.badge-outline', { hasText: /^sent$/ }).count()) === 5);
   expect('done sentinel written', fs.existsSync(path.join(out, 'done')));
   expect('server.json removed on clean shutdown', !fs.existsSync(path.join(out, 'server.json')));
   expect('no JS error', errors.length === 0);
