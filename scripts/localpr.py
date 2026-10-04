@@ -70,6 +70,7 @@ GIT_HARDENING = [
 DIFF_OPTS = ["--no-color", "--no-ext-diff", "--no-textconv", "-U3"]
 
 HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
+BLOB_INDEX = re.compile(r"^index ([0-9a-f]+)\.\.")
 
 GENERATED = re.compile(
     r"(^|/)(composer\.lock|package-lock\.json|yarn\.lock|pnpm-lock\.yaml)$"
@@ -79,6 +80,8 @@ GENERATED = re.compile(
 FILE_CAP = 400
 LINE_HEIGHT = 20
 GLOBAL_CAP = 15000
+CONTEXT_CAP = 512 * 1024
+CONTEXT_BUDGET = 16 * 1024 * 1024
 MAX_PAYLOAD = 256 * 1024
 
 
@@ -150,6 +153,7 @@ def nested_repo_record(path):
         "path": path,
         "pathBefore": None,
         "status": "sousmodule",
+        "blobBefore": None,
         "hunks": [],
         "note": "nested git repository, not tracked here - contents not shown",
     }
@@ -336,10 +340,12 @@ def parse_diff(text):
         nonlocal courant, header
         before, after = paths_from_header(header)
         path = after or before or "(unknown path)"
+        index = next((m.group(1) for m in map(BLOB_INDEX.match, header) if m), None)
         courant = {
             "path": path,
             "pathBefore": before if before != path else None,
             "status": status_from_header(header, before, after),
+            "blobBefore": index if index and index.strip("0") else None,
             "hunks": [],
         }
         header = []
@@ -471,6 +477,75 @@ def build_model(repo, base=None):
         },
         "files": files,
     }
+
+
+def read_blobs(repo, names):
+    """One `cat-file --batch` for the whole review: a git process per file costs seconds on
+    hundreds of files. Sliced in bytes, by the announced size: decoding first shifts the offsets."""
+    try:
+        r = subprocess.run(["git", *GIT_HARDENING, "cat-file", "--batch"], cwd=str(repo),
+                           input="".join(n + "\n" for n in names).encode(),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError:
+        return {}
+    out, pos, blobs = r.stdout, 0, {}
+    for name in names:
+        fin = out.find(b"\n", pos)
+        if fin < 0:
+            break
+        tete = out[pos:fin].split()
+        pos = fin + 1
+        if len(tete) != 3:
+            continue
+        taille = int(tete[2])
+        if tete[1] == b"blob":
+            blobs[name] = out[pos:pos + taille]
+        pos += taille + 1
+    return blobs
+
+
+def hidden_sources(repo, model):
+    """Read from the blob the diff started from: the working tree may have moved since generation,
+    and with --base the new side of a committed change is not on disk at all."""
+    files = sorted((f for f in model["files"]
+                    if f["hunks"] and f.get("blobBefore") and not f["generated"]),
+                   key=lambda f: tree_order(f["path"]))
+    blobs = read_blobs(repo, sorted({f["blobBefore"] for f in files}))
+    sources, budget = {}, CONTEXT_BUDGET
+    for f in files:
+        brut = blobs.get(f["blobBefore"])
+        if brut is None or len(brut) > min(CONTEXT_CAP, budget):
+            continue
+        lines = brut.decode("utf-8", errors="replace").split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()
+        if agrees_with_diff(lines, f):
+            sources[f["index"]] = lines
+            budget -= len(brut)
+    return sources
+
+
+def agrees_with_diff(lines, f):
+    """A clean filter or an autocrlf makes the blob differ from what git diffed."""
+    return all(0 < l["before"] <= len(lines) and lines[l["before"] - 1] == l["txt"]
+               for h in f["hunks"] for l in h["lines"] if l["t"] != "add")
+
+
+def gaps(hunks, lines, complete):
+    """Gap k precedes hunk k, and one more follows the last hunk unless the file was cut short.
+    A hunk counting 0 old lines sits AFTER its start line, not on it."""
+    out, avant, apres = [], 0, 0
+    for h in hunks:
+        m = HUNK_HEADER.match(h["header"])
+        debut, n = int(m.group(1)), int(m.group(2) or 1)
+        debut_apres, n_apres = int(m.group(3)), int(m.group(4) or 1)
+        out.append({"before": avant + 1, "after": apres + 1,
+                    "lines": lines[avant:debut - 1 if n else debut]})
+        avant = debut + n - 1 if n else debut
+        apres = debut_apres + n_apres - 1 if n_apres else debut_apres
+    out.append({"before": avant + 1, "after": apres + 1,
+                "lines": lines[avant:] if complete else []})
+    return out
 
 
 STATUS_NOTES = {
@@ -726,17 +801,35 @@ JS = r"""
 
   /* The model is read once from the rendered unified table, colorised: the split view is
      rebuilt from it, and a comment anchor stays computable whichever view is showing. */
+  function attrsTrou(td) {
+    return td.dataset.gap ? ' data-gap="' + td.dataset.gap + '" data-lines="' + td.dataset.lines +
+      '" data-mode="' + td.dataset.mode + '"' : '';
+  }
+
+  function unifiee(section) {
+    var t = section.querySelector('.diff-table');
+    return t && t.classList.contains('split') ? section._unified : t;
+  }
+
   function modele(section) {
     if (section._rows) return section._rows;
     coloriser(section);
-    var rows = [], hunk = null;
-    section.querySelectorAll('.diff-table > tbody > tr').forEach(function (tr) {
+    var rows = [], hunk = null, table = unifiee(section);
+    if (table) table.querySelectorAll(':scope > tbody > tr').forEach(function (tr) {
+      var td = tr.firstElementChild;
       if (tr.classList.contains('hunk')) {
-        hunk = tr.firstElementChild.dataset.hunk;
-        rows.push({ t: 'hunk', html: tr.firstElementChild.innerHTML, brut: hunk });
+        hunk = td.dataset.hunk;
+        rows.push({ t: 'hunk', html: td.innerHTML, brut: hunk, trou: attrsTrou(td) });
         return;
       }
+      if (tr.classList.contains('gap-tail')) { rows.push({ t: 'tail', html: td.innerHTML, trou: attrsTrou(td) }); return }
       if (tr.classList.contains('nonl-row')) { rows.push({ t: 'nonl' }); return }
+      if (tr.classList.contains('expanded')) {
+        rows.push({ t: 'ctx', etendu: true, before: tr.children[0].textContent,
+                    after: tr.children[1].textContent, html: tr.children[2].innerHTML,
+                    text: texteDe(tr.children[2]), hunk: hunk });
+        return;
+      }
       if (!tr.classList.contains('commentable')) return;
       var tds = tr.children, code = tds[2];
       rows.push({
@@ -784,14 +877,19 @@ JS = r"""
       if (r.t === 'add') { adds.push(r); return }
       vider();
       if (r.t === 'hunk') {
-        out.push('<tr class="hunk"><td colspan="4" data-hunk="' + esc(r.brut) + '">' + r.html +
-          '</td></tr>');
+        out.push('<tr class="hunk"><td colspan="4" data-hunk="' + esc(r.brut) + '"' + r.trou + '>' +
+          r.html + '</td></tr>');
+        return;
+      }
+      if (r.t === 'tail') {
+        out.push('<tr class="gap-tail"><td colspan="4"' + r.trou + '>' + r.html + '</td></tr>');
         return;
       }
       if (r.t === 'nonl') {
         out.push('<tr class="nonl-row"><td colspan="4" class="nonl">no newline at end of file</td></tr>');
         return;
       }
+      if (r.etendu) { out.push(ligneDepliee(r, true)); return }
       out.push('<tr class="ctx commentable">' +
         '<td class="line-num ctx">' + (r.before || '') + '</td>' +
         '<td class="line-code ctx">' + r.html + '</td>' +
@@ -819,6 +917,73 @@ JS = r"""
       table.replaceWith(section._unified);
     }
     return true;
+  }
+
+  var PAS = D.expandStep;
+
+  function ligneDepliee(l, split) {
+    var code = '<td class="line-code ctx">' + l.html + '</td>';
+    return '<tr class="ctx expanded"><td class="line-num ctx">' + l.before + '</td>' +
+      (split ? code + '<td class="line-num ctx">' + l.after + '</td>' + code
+             : '<td class="line-num ctx">' + l.after + '</td>' + code) + '</tr>';
+  }
+
+  function contenuTrou(section, k) {
+    if (!section._gaps) section._gaps = JSON.parse(section.querySelector('script.gaps').textContent);
+    return section._gaps[k];
+  }
+
+  function etatTrou(section, td) {
+    var etats = section._trous || (section._trous = {}), k = td.dataset.gap;
+    return etats[k] || (etats[k] = {
+      lo: 0, hi: +td.dataset.lines, fin: td.parentNode.classList.contains('gap-tail')
+    });
+  }
+
+  function modeTrou(k, g) {
+    var reste = g.hi - g.lo;
+    return !reste ? '' : reste <= PAS ? 'all' : k === '0' ? 'up' : g.fin ? 'down' : 'both';
+  }
+
+  function tablesDe(section) {
+    var t = section.querySelector('.diff-table');
+    if (!t) return [];
+    return section._unified && section._unified !== t ? [t, section._unified] : [t];
+  }
+
+  /* Both tables are patched in place: rebuilding the split one would drop a comment being typed. */
+  function majBoutons(section, k) {
+    tablesDe(section).forEach(function (t) {
+      var td = t.querySelector('td[data-gap="' + k + '"]');
+      if (!td) return;
+      var mode = modeTrou(k, etatTrou(section, td));
+      if (mode) { td.dataset.mode = mode; return }
+      if (td.parentNode.classList.contains('gap-tail')) { td.parentNode.remove(); return }
+      td.querySelector('.expanders').remove();
+      delete td.dataset.gap;
+    });
+    section._rows = null;
+  }
+
+  function etendre(section, td, dir) {
+    var k = td.dataset.gap, g = etatTrou(section, td), contenu = contenuTrou(section, k);
+    var debut = g.lo, fin = g.hi;
+    if (dir === 'up') debut = Math.max(g.lo, g.hi - PAS);
+    if (dir === 'down') fin = Math.min(g.hi, g.lo + PAS);
+    if (dir === 'up') g.hi = debut; else g.lo = fin;
+    var colorier = window.Render ? Render.highlighterFor(section.dataset.language || '') : esc;
+    var lignes = [];
+    for (var i = debut; i < fin; i++) {
+      lignes.push({ before: contenu.before + i, after: contenu.after + i,
+                    html: '<span class="marker"></span>' + colorier(contenu.lines[i]) });
+    }
+    tablesDe(section).forEach(function (t) {
+      var split = t.classList.contains('split');
+      var td = t.querySelector('td[data-gap="' + k + '"]');
+      if (td) td.parentNode.insertAdjacentHTML(dir === 'up' ? 'afterend' : 'beforebegin',
+        lignes.map(function (l) { return ligneDepliee(l, split) }).join(''));
+    });
+    majBoutons(section, k);
   }
 
   /* Colorising and the split rebuild are paid per file, on the DOM of a page that already holds
@@ -1133,7 +1298,9 @@ JS = r"""
   }
 
   function fenetre(section, side, line) {
-    var rows = modele(section).filter(function (r) { return r.t !== 'hunk' && r.t !== 'nonl' });
+    var rows = modele(section).filter(function (r) {
+      return r.t !== 'hunk' && r.t !== 'nonl' && r.t !== 'tail' && !r.etendu;
+    });
     var i = -1, cle = String(line);
     for (var k = 0; k < rows.length; k++) {
       var r = rows[k];
@@ -1374,6 +1541,12 @@ JS = r"""
       var s = chev.closest('.file-diff');
       s.classList.toggle('collapsed');
       preparer(s);
+      return;
+    }
+
+    var deplier = e.target.closest('.expand');
+    if (deplier) {
+      etendre(deplier.closest('.file-diff'), deplier.closest('[data-gap]'), deplier.dataset.dir);
       return;
     }
 
@@ -1775,19 +1948,41 @@ def diffstat_bar(additions, deletions):
     return f'<span class="diffstat-bar">{"".join(cases)}</span>'
 
 
-def hunk_header_row(hunk):
+EXPAND_STEP = 20
+EXPANDERS = ('<span class="expanders">'
+             '<button class="expand" data-dir="down" title="Expand down"></button>'
+             '<button class="expand" data-dir="up" title="Expand up"></button>'
+             '<button class="expand" data-dir="all" title="Expand all"></button></span>')
+
+
+def expand_mode(k, n, tail):
+    """Recomputed by modeTrou in the JS after each click: the two must agree."""
+    return "all" if n <= EXPAND_STEP else "up" if k == 0 else "down" if tail else "both"
+
+
+def gap_cell(k, trou, tail=False):
+    """Buttons rendered here rather than on approach, and the lines parsed on the first click:
+    either one, paid per file as the scroll reaches it, cost the scroll several percent."""
+    if not trou or not trou["lines"]:
+        return "", ""
+    n = len(trou["lines"])
+    return (f' data-gap="{k}" data-lines="{n}" data-mode="{expand_mode(k, n, tail)}"', EXPANDERS)
+
+
+def hunk_header_row(hunk, depliable=("", "")):
     bouts = hunk["header"].split("@@")
     plage = f'@@{bouts[1]}@@' if len(bouts) > 2 else hunk["header"]
     section = (f'<span class="section">{esc(hunk["section"])}</span>'
                if hunk.get("section") else "")
-    return (f'<tr class="hunk"><td colspan="3" data-hunk="{esc(hunk["header"])}">'
-            f'<span class="range">{esc(plage)}</span>{section}</td></tr>')
+    attrs, boutons = depliable
+    return (f'<tr class="hunk"><td colspan="3" data-hunk="{esc(hunk["header"])}"{attrs}>'
+            f'{boutons}<span class="range">{esc(plage)}</span>{section}</td></tr>')
 
 
-def render_lines(f, hunk):
+def render_lines(f, hunk, depliable=("", "")):
     """Cells, not rows, carry the side and the line number: the split view is rebuilt from
     them on the client, where a single row holds one line of each side."""
-    out = [hunk_header_row(hunk)]
+    out = [hunk_header_row(hunk, depliable)]
     for l in hunk["lines"]:
         kind = {"add": "add", "del": "del"}.get(l["t"], "ctx")
         marqueur = {"add": "+", "del": "-"}.get(l["t"], "")
@@ -1811,35 +2006,50 @@ def render_lines(f, hunk):
     return "".join(out)
 
 
-def render_file(f, restant):
+def render_file(f, restant, source=None):
     """Expanded by default: a review exists to be read, and find-in-page returns nothing
     inside a collapsed panel. Only files past the cap and obviously generated files
     start collapsed."""
     total = sum(len(h["lines"]) for h in f["hunks"])
     replie = total > FILE_CAP or f["generated"] or restant <= 0
-    body, shown, coupe = [], 0, False
+    rendus, shown, coupe = [], 0, False
     for h in f["hunks"]:
         if shown >= FILE_CAP or restant - shown <= 0:
             coupe = True
             break
-        body.append(render_lines(f, h))
+        rendus.append(h)
         shown += len(h["lines"])
+
+    trous = gaps(rendus, source, not coupe) if source is not None else []
+    if not any(t["lines"] for t in trous):
+        trous = []
+    body = [render_lines(f, h, gap_cell(k, trous[k] if trous else None))
+            for k, h in enumerate(rendus)]
+    if trous and trous[-1]["lines"]:
+        attrs, boutons = gap_cell(len(trous) - 1, trous[-1], tail=True)
+        body.append(f'<tr class="gap-tail"><td colspan="3"{attrs}>{boutons}</td></tr>')
+    lignes = "".join(body)
 
     if f["note"]:
         inner = f'<div class="empty">{esc(f["note"])}</div>'
     elif not f["hunks"]:
         inner = '<div class="empty">no textual content in this diff</div>'
     else:
-        inner = f'<table class="diff-table"><tbody>{"".join(body)}</tbody></table>'
+        inner = f'<table class="diff-table"><tbody>{lignes}</tbody></table>'
+        if trous:
+            inner += ('<script type="application/json" class="gaps">'
+                      + json.dumps(trous, ensure_ascii=False).replace("</", "<\\/")
+                      + "</script>")
         if coupe:
             inner += (f'<div class="truncated">… {fmt_num(total - shown)} more line(s), '
                       f'not shown (cap of {FILE_CAP} per file)</div>')
 
     # Reserved for a body not laid out yet: a stylesheet guess makes the scrollbar jump.
-    hauteur = inner.count("<tr") * LINE_HEIGHT + (34 if coupe else 0) or 60
+    hauteur = lignes.count("<tr") * LINE_HEIGHT + (34 if coupe else 0) or 60
 
     large = max([len(str(l["after"] or l["before"] or "")) for h in f["hunks"]
-                 for l in h["lines"]] or [2])
+                 for l in h["lines"]] + [len(str(t["after"] + len(t["lines"]))) for t in trous]
+                or [2])
 
     dossier, _, nom = f["path"].rpartition("/")
     chemin = (f'<span class="dir">{esc(dossier)}/</span>' if dossier else "") + \
@@ -1876,6 +2086,12 @@ def render_file(f, restant):
         f'</div></div>'
         f'<div class="file-diff-body">{inner}</div></section>'
     ), shown
+
+
+def tree_order(path):
+    """Must sort exactly as render_tree_level walks: directories before files, at every level."""
+    parts = path.split("/")
+    return [(0, d) for d in parts[:-1]] + [(1, parts[-1].lower())]
 
 
 def tree_nodes(files):
@@ -1987,16 +2203,17 @@ def render_tabs(model):
     )
 
 
-def render(model, comments, findings, replies, token, sent=()):
+def render(model, comments, findings, replies, token, sent=(), sources=None):
     body, restant = [], GLOBAL_CAP
-    for f in model["files"]:
-        html_f, shown = render_file(f, restant)
+    for f in sorted(model["files"], key=lambda f: tree_order(f["path"])):
+        html_f, shown = render_file(f, restant, (sources or {}).get(f["index"]))
         restant -= shown
         body.append(html_f)
 
     donnees = {
         "repo": model["repo"], "base": model["base"], "token": token or "",
         "comments": comments, "findings": findings, "replies": replies, "sent": list(sent),
+        "expandStep": EXPAND_STEP,
         "files": [{"path": f["path"], "fingerprint": f["fingerprint"]}
                   for f in model["files"]],
     }
@@ -2301,6 +2518,7 @@ class Review:
         self.port = 0
         self.blob = b""
         self.model = None
+        self.sources = {}
         self.last_seen = time.time()
         lots = read_json(out / "batches.json")
         self.lots = lots if isinstance(lots, list) else []
@@ -2321,13 +2539,15 @@ class Review:
         localStorage."""
         findings = index_findings(load_findings(self.findings), self.model)
         page = render(self.model, read_json(self.out / "comments.json"), findings,
-                      load_replies(self.out / "replies"), self.token, sent_ids(self.lots))
+                      load_replies(self.out / "replies"), self.token, sent_ids(self.lots),
+                      self.sources)
         self.blob = page.encode("utf-8")
         write_atomic(self.out / "review.html",
                         page.replace(f'"token": "{self.token}"', '"token": ""'))
 
     def regenerer(self):
         self.model = build_model(self.repo, self.base)
+        self.sources = hidden_sources(self.repo, self.model)
         write_atomic(self.out / "diff.json",
                         json.dumps(self.model, ensure_ascii=False, indent=2))
         self.rendre()
@@ -2894,7 +3114,8 @@ def main():
 
     page = out / "review.html"
     write_atomic(page, render(model, comments, findings, replies, None,
-                              sent_ids(lots if isinstance(lots, list) else [])))
+                              sent_ids(lots if isinstance(lots, list) else []),
+                              hidden_sources(repo, model)))
     t = model["totals"]
     print(f"{t['files']} file(s), +{t['additions']}/-{t['deletions']}")
     print(f"file://{page}")
