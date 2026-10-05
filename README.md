@@ -36,20 +36,10 @@ As a Claude Code plugin:
 /plugin install localpr@localpr
 ```
 
-Then, in any repository: `/localpr:review`.
+Then, in any repository: `/localpr:review` — or `/localpr:review --base develop` to review a
+whole branch rather than the working tree. Requires Python 3.9+ and git.
 
-Standalone: `python3 scripts/localpr.py /path/to/repo --serve`. Requires Python 3.9+ and git.
-
-## Usage
-
-```bash
-python3 scripts/localpr.py <repo>                 # static page, prints a file:// URL
-python3 scripts/localpr.py <repo> --serve         # serve the page and collect comments
-python3 scripts/localpr.py <repo> --base develop  # review a whole branch, not just the working tree
-python3 scripts/localpr.py <repo> --check         # verify the parser against git diff --numstat
-python3 scripts/localpr.py --list                 # review servers still alive
-python3 scripts/localpr.py --stop-all             # stop them
-```
+## What it writes
 
 Everything lands in `~/.claude/reviews/<project>/<timestamp>/`:
 
