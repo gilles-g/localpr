@@ -1,7 +1,12 @@
 # localpr
 
-Review a local git diff like a pull request — click a line, leave a comment — then hand the
-review back to Claude Code with the protocol to apply it.
+Review Claude's uncommitted changes in a local GitHub-style pull request page: comment on any
+line, send comments in batches while Claude keeps working, ask Claude questions answered inline in
+the thread, and get each comment back marked fixed or refused.
+
+```
+/localpr:review
+```
 
 One Python script, standard library only. No service, no account, no network: the page opens
 offline.
@@ -11,7 +16,8 @@ offline.
 ## Why
 
 `git diff` shows the change but gives you nowhere to write. A large diff is unreadable in a
-terminal, and "this line is wrong" has to be retyped into a chat.
+terminal, and "this line is wrong" has to be retyped into a chat. That hurts most right after
+Claude has written a few hundred lines you are about to commit.
 
 localpr renders the diff as a page, anchors each comment to a line, and on **Finish review** writes
 a `TODO.md` that Claude Code reads back. **Send comments** hands over what is written so far without
@@ -23,9 +29,25 @@ ending the review: Claude handles that batch while you keep reading. Each commen
 | **Follow-up** | reported back, nothing written |
 | **Workflow note** | recorded as a lesson about the way of working |
 
-Claude keeps the explicit right to refuse a comment it believes is wrong, with its reason.
+Claude keeps the explicit right to refuse a comment it believes is wrong, with its reason. Each
+comment comes back into its thread with a verdict: **fixed**, **refused**, **out-of-scope**, or
+for a line that no longer exists, **anchor-lost**.
 
 ![Commenting on a line: the form opens under it, with the three kinds](docs/comment-form.png)
+
+## Talk to Claude in the thread
+
+- **Ask Claude now** — tick it on a comment to send that question alone, at once, optionally
+  through a skill (`dev-gourou`, …). Claude answers in the thread and does not touch the code.
+- **Reply** — under any sent thread, answer Claude back ("do what you suggested", "no, keep the
+  old name"). The thread so far travels with your reply, so Claude knows what you are talking
+  about.
+
+## Reading a large diff
+
+Unified or split view, light / dark / dark dimmed themes, context expanded around any hunk, files
+ticked **Viewed**, a searchable file tree, soft wrap and tab size. The page stays fluid on reviews
+of several hundred files.
 
 ## Install
 
@@ -36,8 +58,20 @@ As a Claude Code plugin:
 /plugin install localpr@localpr
 ```
 
-Then, in any repository: `/localpr:review` — or `/localpr:review --base develop` to review a
-whole branch rather than the working tree. Requires Python 3.9+ and git.
+Requires Python 3.9+ and git.
+
+## Run
+
+In Claude Code, from any repository:
+
+```
+/localpr:review                   # review the working tree
+/localpr:review --base develop    # review the whole branch against develop
+/localpr:review ../other-repo     # review another repository
+```
+
+Claude prints the page URL and hands control back; open it, comment, then use
+either **Send comments** or **Finish review**.
 
 ## What it writes
 
@@ -49,7 +83,9 @@ Everything lands in `~/.claude/reviews/<project>/<timestamp>/`:
 | `diff.json` | the data model — the source of truth for comment anchors |
 | `comments.json` | the review, rewritten atomically on every save |
 | `batch-<n>.md` | the comments handed over by **Send comments**, the review still going on |
-| `events.log` | one line per batch, then one when the server stops — what Claude watches |
+| `ask-<n>.md` | a question put to Claude from a comment, sent alone and at once |
+| `batches.json` | which comment went in which batch |
+| `events.log` | one line per batch, question and finish, then one when the server stops — what Claude watches |
 | `TODO.md` | the comments no batch carried, grouped by file, plus how to handle them |
 | `replies/<id>.json` | one reply per comment, written when they are applied |
 | `done` | sentinel: the review is over |
@@ -71,14 +107,15 @@ Untracked files and directories, staged changes, paths with spaces, quotes or no
 renames, `\ No newline at end of file`. Binary files, mode changes, submodules and nested
 repositories degrade to a one-line notice instead of rendering empty.
 
-An anchor is a **window**, not a line number: the commented line ±2. If the file changed since
-the review, the fingerprint says so and the window is searched again — exact, `rstrip`, `strip`,
-normalised whitespace — rather than trusted blindly. A comment on a deleted line cannot be
-re-anchored: the hunk travels with it.
-
 ## Development
 
 No build, no dependency. `--check` compares the parsed `+/-` against `git diff --numstat`.
+
+An anchor is a window, not a line number: the commented line ±2. If the file changed since the
+review, the fingerprint says so and the window is searched again — exact, `rstrip`, `strip`,
+normalised whitespace — rather than trusted blindly. A comment on a deleted line cannot be
+re-anchored: the hunk travels with it.
+
 CI (`.github/workflows/ci.yml`) builds a fixture repository holding every shape that once broke
 the parser, runs `--check` on Python 3.9 and 3.13, verifies the assets, and drives the served
 page in Chromium through Finish review.
