@@ -185,6 +185,14 @@ The parts that cannot be deduced from a single file:
   single biggest cost on the page (~900 ms of prepaint per 40 mouse moves). It is repositioned on
   `#main`'s scroll, throttled by `requestAnimationFrame`, and its cell lives in
   `boutonAjout.celluleAncree` — the DOM no longer says which line is hovered.
+- **The Conversation tab is a second copy of every thread**, GitHub-style: a card per thread with
+  its snippet (read from `modele(section)`) and the thread itself, rendered by `corpsFil` with the
+  `conv-` prefix in place of `thread-`, so the delegated handlers work in both places. `majFil` is
+  the only thing that rewrites a thread, and it rewrites both copies. `rendreConversation` runs
+  when the tab opens and from `rendreFils`, never from `majCompteurs`, which every save calls: it
+  would drop a reply being typed in a card. Leaving the tab empties the list, so no stale copy
+  sits in the DOM. `aDecider()` (suggestions neither taken up nor dismissed) drives the *to decide*
+  filter, its count and the file tree's badge, so the three cannot disagree.
 
 ### Invariants not to be "repaired"
 
@@ -195,7 +203,8 @@ They are stated in the module docstring, and read like bugs to anyone who does n
   being typed. The **Regenerate** button is the way to re-collect a diff.
 - the page's only `setInterval` is a 30 s **presence heartbeat** to `/ping`: it renders nothing, it
   exists so the server shuts itself down once the tab is closed. It is not a refresh, and neither
-  is the held `POST /replies`: it only rewrites the thread that was answered.
+  is the held `POST /replies`: it only rewrites the thread that was answered. Nor is the held
+  `POST /findings`: it only adds the threads of new suggestions.
 
 ### Local server
 
@@ -203,10 +212,10 @@ Ephemeral port on `127.0.0.1`, mandatory token (`?t=` query on GET, `X-Localpr-T
 `Host` **and** `Origin` checked (DNS rebinding), `OPTIONS` always answers 403 — the absence of a CORS
 header makes the preflight a third-party page would trigger fail — body capped at `MAX_PAYLOAD`.
 Routes: `GET /review.html`, then `POST` on `/ping`, `/prefs`, `/regenerate`, `/comments`, `/batch`,
-`/ask`, `/replies` and `/done`. `/batch` is *Send comments*: the comments no earlier batch carried go to
+`/ask`, `/replies`, `/agent-review`, `/findings` and `/done`. `/batch` is *Send comments*: the comments no earlier batch carried go to
 `batch-<n>.md`, their ids to `batches.json` (`Review.lots`, under a lock), and the server keeps
 running; `/done` only writes into `TODO.md` what no batch carried. The agent learns of a batch
-through `events.log` (`Review.signaler`: `batch …`, `ask …`, `done: …`, `stopped: …`), which the skill tails
+through `events.log` (`Review.signaler`: `batch …`, `ask …`, `review …`, `done: …`, `stopped: …`), which the skill tails
 with a Monitor — stdout of a background server is nothing it can wait on. A sent comment loses
 its delete button: a deletion would never reach the agent already handling it. A comment
 carrying `ask` (*Ask Claude now*, optional `skill`) goes alone through `/ask` to `ask-<n>.md`,
@@ -216,7 +225,25 @@ rewrites that one thread with `majFil`, never `rendreFils`, which would drop an 
 under a sent thread, adds a comment carrying `inReplyTo` — always the thread's **root**, which
 `sanitize_state` enforces — and a copy of the root's anchor; asked or plain, it travels like any
 comment, and `thread_so_far` writes the thread before it into its `.md`: "do what you suggested"
-means nothing without it. A replied-to comment loses its delete button too. Three shutdown paths: *Finish review*, `SILENCE_MAX` (300 s) with no request at all, `--max-minutes`
+means nothing without it. A replied-to comment loses its delete button too. *Review with Claude*
+goes through `/agent-review`: `Relecture.ouvrir` numbers the review on its own sequence and
+pre-creates `findings-<n>.json`, `review-<n>.md` carries `REVIEW_PROTOCOL` (suggest, never touch the
+code, hand it to a fresh subagent if you wrote the diff, append only, end with `"done": true`).
+That file is the review's **only state** — no registry beside it to disagree with it — read in one
+go by `Relecture.lire`, and written by the agent while the page is served: `findings_from` skips a
+malformed entry rather than raising, since every save renders it, and cuts a body to `MAX_BODY`,
+which `sanitize_state` would refuse once taken up. Its findings are ids `F<n>-<k>`, `k` the
+position in the file — hence append only. The page holds `POST /findings` open with the ids it
+knows; the server watches **every** review, not just the awaited ones, or a review asked while the
+request is held would show nothing until it times out. New threads go in with `insererFil`,
+never `rendreFils`. Nothing waits on `done`: an agent that forgets it leaves the button saying
+*Claude is reviewing…*, never locked. *Dismiss* on a suggestion goes to `comments.json` under
+`dismissed`, never into `comments`: everything there reaches the agent. A dismissal carries the
+**body it was made on** and holds only while it matches (`ecartee` on the page,
+`dismissed_findings` on the server): the localStorage state is kept per repository and base, a
+finding id within one review only, so an id alone let an earlier review's dismissal hide another
+finding. The next `review-<n>.md` lists the dismissed suggestions, or a second run raises them
+again. Three shutdown paths: *Finish review*, `SILENCE_MAX` (300 s) with no request at all, `--max-minutes`
 (60 by default). `server.json` is deleted on clean shutdown: a `server.json` with no live process is
 the record of a server that was killed, not of one that is running. A live pid proves nothing
 either — the number goes to the next process to start — so `live_servers` only calls a server
@@ -228,7 +255,9 @@ anything else.
 - **Python and the embedded JS share keys, and nothing checks it.** A comment's type
   (`fix` / `followUp` / `workflowNote`), a reply's `verdict`
   (`fixed` / `refused` / `out-of-scope` / `anchor-lost` / `answered`), a finding's `origin.state`
-  (`applied` / `dropped`) and a pref's `theme` (`auto` / `light` / `dark` / `dimmed`, in `THEMES`,
+  (`applied` / `dropped`), a finding's id (`F…`, tested by `lectureSeule`; `F<n>-` counted by
+  `annoncerFin`), a dismissal's `reason` (`not-relevant` / `duplicate` / `outdated`, in
+  `DISMISS_REASONS` and `RAISONS`) and a pref's `theme` (`auto` / `light` / `dark` / `dimmed`, in `THEMES`,
   in the toolbar's `<option>` values and in the CSS selectors) are produced on the Python side and
   **compared as literals inside the `JS` string** of the same file. A divergence breaks nothing: it silently degrades the rendering
   (`undefined` label, severity falling back to `nitpick`, a correct reply displayed as a failure).
@@ -265,7 +294,7 @@ anything else.
 ## Still undecided
 
 `claude plugin validate --strict` passes: MIT `LICENSE`, `author` in `plugin.json` (name + GitHub
-URL, no email), and the two version fields aligned on `0.9.0` — `plugin.json` wins at install time.
+URL, no email), and the two version fields aligned on `0.10.0` — `plugin.json` wins at install time.
 The install snippet points at `gilles-g/localpr`, the repository's own remote.
 
 The `marketplace.json` entry **follows `main`**: its `source` is `./`, no tag, no `ref`. Whatever
