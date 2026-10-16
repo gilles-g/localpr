@@ -44,8 +44,9 @@ for a line that no longer exists, **anchor-lost**.
 - **Reply** — under any sent thread, answer Claude back ("do what you suggested", "no, keep the
   old name"). The thread so far travels with your reply, so Claude knows what you are talking
   about.
-- **Review with Claude** — ask for a review of the whole diff, optionally through a skill. A fresh
-  agent reviews it and its suggestions land under their lines as it goes; **take up** the ones you
+- **Review with Claude** — ask for a review of the whole diff, optionally through a skill, on the
+  model and at the effort of your choice. A fresh agent reviews it and its suggestions land under
+  their lines as it goes, each naming the model and effort that wrote it; **take up** the ones you
   agree with and they become comments like yours. **Dismiss** the others as not relevant,
   duplicate or outdated: they fold away, never reach the code, and the next review is told not to
   raise them again.
