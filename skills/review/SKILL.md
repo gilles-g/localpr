@@ -29,6 +29,9 @@ State these two points, one line each, because neither is guessable:
 - **Ask Claude now**, ticked in a comment (optionally naming a skill), sends that comment alone, at
   once: the answer shows up in its thread without `↻`. **Reply**, under a sent thread, follows it
   up — asked again at once, or as a plain comment that waits for the next batch.
+- **Review with Claude** asks for a review of the whole diff: suggestions show up on the page as
+  they come, and only the ones taken up become comments; the ones dismissed fold away, and the
+  next review is told not to raise them again.
 
 Then arm a **Monitor** on the output directory's event log, and nothing else — no polling, no
 relaunch. This is a human review and it takes as long as it takes:
@@ -46,6 +49,9 @@ is an event:
 - `ask <n>: … - to handle: <path>` — the developer is **waiting on screen**: drop everything else,
   read that `ask-<n>.md` and write each answer to `replies/<id>.json` as it is ready. Answer, do not
   change the code; a named skill is invoked first.
+- `review <n>: … - to handle: <path>` — hand that `review-<n>.md` to a **fresh subagent**, in the
+  background: the session that wrote the diff is the wrong one to review it. The subagent writes
+  `findings-<n>.json` as it goes and ends with `"done": true`; keep monitoring meanwhile.
 - `done: … - to handle: <path>` — read `TODO.md`, the comments no batch carried; stop the monitor.
 - `stopped: …` — the server died without *Finish review*; stop the monitor and say so.
 

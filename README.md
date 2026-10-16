@@ -42,6 +42,14 @@ for a line that no longer exists, **anchor-lost**.
 - **Reply** — under any sent thread, answer Claude back ("do what you suggested", "no, keep the
   old name"). The thread so far travels with your reply, so Claude knows what you are talking
   about.
+- **Review with Claude** — ask for a review of the whole diff, optionally through a skill. A fresh
+  agent reviews it and its suggestions land under their lines as it goes; **take up** the ones you
+  agree with and they become comments like yours. **Dismiss** the others as not relevant,
+  duplicate or outdated: they fold away, never reach the code, and the next review is told not to
+  raise them again.
+- **Conversation** — every thread in one list, with the code it is about: reply, take up or dismiss
+  from there, or jump to it in the diff. **to decide** keeps only the suggestions still waiting on
+  you, and the file tree flags the files that hold some.
 
 ## Reading a large diff
 
@@ -84,8 +92,10 @@ Everything lands in `~/.claude/reviews/<project>/<timestamp>/`:
 | `comments.json` | the review, rewritten atomically on every save |
 | `batch-<n>.md` | the comments handed over by **Send comments**, the review still going on |
 | `ask-<n>.md` | a question put to Claude from a comment, sent alone and at once |
+| `review-<n>.md` | a review of the whole diff asked of Claude by **Review with Claude** |
+| `findings-<n>.json` | the suggestions Claude writes back for that review, as it goes |
 | `batches.json` | which comment went in which batch |
-| `events.log` | one line per batch, question and finish, then one when the server stops — what Claude watches |
+| `events.log` | one line per batch, question, review and finish, then one when the server stops — what Claude watches |
 | `TODO.md` | the comments no batch carried, grouped by file, plus how to handle them |
 | `replies/<id>.json` | one reply per comment, written when they are applied |
 | `done` | sentinel: the review is over |

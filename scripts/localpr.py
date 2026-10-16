@@ -15,6 +15,8 @@ Outputs, under --out (default ~/.claude/reviews/<project>/<timestamp>/):
     server.json         {url, port, token, pid} in --serve mode
     batch-<n>.md        the comments sent in batch n, the server still running
     ask-<n>.md          a question put to Claude from a comment, sent on its own and at once
+    review-<n>.md       a review of the whole diff asked of Claude, findings-<n>.json the
+                        suggestions it writes back as it goes
     batches.json        which comment went in which batch
     events.log          one line per batch, then one when the server stops
     TODO.md             the comments not sent in a batch, plus how to handle them
@@ -37,7 +39,8 @@ The page's only setInterval is a 30s presence heartbeat to /ping: it renders not
 overwrites nothing, it exists so the server shuts itself down once the tab is closed. Do not
 mistake it for a refresh, and do not remove it in the name of the paragraph above.
 The same goes for POST /replies, held open by the server while a question to Claude is pending:
-it only rewrites the thread that was answered, never the form being typed.
+it only rewrites the thread that was answered, never the form being typed. And for POST
+/findings, held open while Claude reviews: it only adds the threads of the new suggestions.
 """
 
 import argparse
@@ -677,10 +680,12 @@ JS = r"""
   var CLE = 'localpr:' + D.repo + ':' + D.base;
   var CLE_VUS = 'localpr:viewed:' + D.repo + ':' + D.base;
   var CLE_PREFS = 'localpr:prefs';
-  var server = false, state = null, seq = 0, envoyes = {};
+  var server = false, state = null, seq = 0, envoyes = {}, relectures = {};
   (D.sent || []).forEach(function (id) { envoyes[id] = 1 });
+  (D.runs || []).forEach(function (r) { relectures[r.n] = r });
   var SEVS = { fix: 'blocking', followUp: 'nitpick', workflowNote: 'question' };
   var LIBS = { fix: 'Must fix', followUp: 'Follow-up', workflowNote: 'Workflow note' };
+  var RAISONS = { 'not-relevant': 'not relevant', duplicate: 'duplicate', outdated: 'outdated' };
 
   function maintenant() { return new Date().toISOString() }
   /* The server stamps its local offset, the page stamps UTC: compared as strings, a comment
@@ -759,6 +764,7 @@ JS = r"""
     $('tab-conversation').setAttribute('aria-selected', String(conv));
     $('tab-files').setAttribute('aria-selected', String(!conv));
     document.body.classList.toggle('on-conversation', conv);
+    rendreConversation();
   }
 
   var gabarit = document.createElement('template');
@@ -1017,8 +1023,17 @@ JS = r"""
   }
 
   function majCompteurs() {
-    var par = comptes();
+    var par = comptes(), decide = {};
+    aDecider().forEach(function (f) { var k = String(f.fichier_index); decide[k] = (decide[k] || 0) + 1 });
     document.querySelectorAll('.tree-file').forEach(function (b) {
+      var d = decide[b.dataset.f] || 0, p = b.querySelector('.tree-decide');
+      if (d && !p) {
+        p = document.createElement('span');
+        p.className = 'tree-decide';
+        p.title = 'Claude suggestions to decide';
+        b.querySelector('.tree-badge, .tree-stat').before(p);
+      }
+      if (p) { p.textContent = d || ''; p.hidden = !d }
       var n = par[b.dataset.f] || 0, c = b.querySelector('.tree-badge');
       if (n && !c) {
         c = document.createElement('span');
@@ -1044,26 +1059,75 @@ JS = r"""
     return rep.verdict === 'fixed' ? 'done' : 'replied';
   }
 
+  function aDecider() {
+    return affiches().filter(function (c) { return lectureSeule(c) && !ecartee(c) });
+  }
+
+  function etatCarte(c) {
+    return lectureSeule(c) ? (ecartee(c) ? 'dismissed' : 'decide') : etatDe(c);
+  }
+
+  function extraitCode(c) {
+    var section = sectionDe(c);
+    if (!section || c.scope !== 'line' || c.line == null) return '';
+    var rows = modele(section), cle = String(c.line), i = -1;
+    for (var k = 0; k < rows.length && i < 0; k++) {
+      var r = rows[k];
+      if (r.t === 'hunk' || r.t === 'nonl' || r.t === 'tail') continue;
+      if (c.side === 'old' ? r.t !== 'add' && r.before === cle : r.t !== 'del' && r.after === cle) i = k;
+    }
+    var lignes = [];
+    for (var j = i; j >= 0 && lignes.length < 4; j--) {
+      if (rows[j].t === 'hunk' || rows[j].t === 'tail') break;
+      if (rows[j].t !== 'nonl') lignes.unshift(rows[j]);
+    }
+    if (!lignes.length) return '';
+    return '<table class="conv-snippet"><tbody>' + lignes.map(function (r) {
+      return '<tr class="' + r.t + '"><td class="conv-num">' + esc(r.t === 'del' ? r.before : r.after) +
+        '</td><td class="conv-code">' + r.html + '</td></tr>';
+    }).join('') + '</tbody></table>';
+  }
+
+  function carte(c) {
+    var e = etatCarte(c), ou = c.file ? c.file + (c.line ? ':' + c.line : '') : 'the whole review';
+    return '<div class="conv-card ' + e + '" data-carte="' + esc(c.id) + '">' +
+      '<div class="conv-head"><span class="tracker-dot ' + e + '"></span>' +
+      '<span class="conv-file">' + esc(ou) + '</span>' +
+      '<button class="btn btn-sm" data-goto="' + esc(c.id) + '">View in code</button></div>' +
+      extraitCode(c) + corpsFil(c, lectureSeule(c), 'conv-') + '</div>';
+  }
+
+  function majCarte(c) {
+    var carteC = document.querySelector('.conv-card[data-carte="' + c.id + '"]');
+    if (!carteC) return;
+    var e = etatCarte(c);
+    carteC.className = 'conv-card ' + e;
+    carteC.querySelector('.tracker-dot').className = 'tracker-dot ' + e;
+  }
+
+  /* Never from majCompteurs, which every save calls: it would drop a reply being typed here. */
+  function rendreConversation() {
+    $('tracker-list').innerHTML = onglet === 'conversation' ? affiches().map(carte).join('') : '';
+  }
+
   function rendreTracker() {
-    var liste = $('tracker-list');
-    $('tracker').hidden = state.comments.length === 0;
+    var liste = affiches(), k = aDecider().length, filtre = $('ct-decide');
+    $('tracker').hidden = !liste.length;
     var compte = { pending: 0, open: 0, replied: 0, done: 0 };
-    liste.innerHTML = state.comments.map(function (c) {
-      var e = etatDe(c);
-      compte[e]++;
-      var ou = c.file ? c.file + (c.line ? ':' + c.line : '') : 'global';
-      return '<button class="tracker-item ' + e + '" data-goto="' + esc(c.id) + '">' +
-        '<span class="tracker-line"><span class="tracker-dot ' + e + '"></span>' +
-        '<span class="tracker-file">' + esc(ou) + '</span></span>' +
-        '<span class="tracker-body">' + esc(c.body) + '</span></button>';
-    }).join('');
+    state.comments.forEach(function (c) { compte[etatDe(c)]++ });
+    filtre.textContent = k + ' to decide';
+    filtre.hidden = !k;
+    if (!k) {
+      filtre.setAttribute('aria-pressed', 'false');
+      $('tracker-list').classList.remove('only-decide');
+    }
     $('ct-pending').textContent = compte.pending + ' not sent';
     $('ct-open').textContent = compte.open + ' open';
     $('ct-replied').textContent = compte.replied + ' replied';
     $('ct-done').textContent = compte.done + ' done';
-    $('conversation-empty').hidden = state.comments.length > 0;
-    $('tab-count').hidden = state.comments.length === 0;
-    $('tab-count').textContent = (compte.pending + compte.open) + ' open';
+    $('conversation-empty').hidden = liste.length > 0;
+    $('tab-count').hidden = !liste.length;
+    $('tab-count').textContent = (compte.pending + compte.open + k) + ' open';
     var be = $('envoyer');
     be.textContent = compte.pending ? 'Send ' + compte.pending + ' comment(s)' : 'Send comments';
     be.disabled = !compte.pending || $('terminer').disabled;
@@ -1102,12 +1166,65 @@ JS = r"""
     return state.comments.filter(function (x) { return x.inReplyTo === c.id });
   }
 
-  function corpsFil(c, readonly) {
+  function trouverFinding(id) {
+    return D.findings.filter(function (f) { return f.id === id })[0];
+  }
+
+  /* The local state is kept per repository and base, a finding id within one review only: without
+     the body, a dismissal left by an earlier review would hide another finding. */
+  function ecartee(f) {
+    var e = (state.dismissed || {})[f.id];
+    return e && e.body === f.body ? e : null;
+  }
+
+  function ecarter(id, raison) {
+    var f = trouverFinding(id);
+    if (!f || !RAISONS[raison]) return;
+    /* Rebuilt rather than added to: earlier reviews' dismissals never match again, and past
+       MAX_COMMENTS the server would refuse the whole review. */
+    var gardes = {};
+    D.findings.forEach(function (x) { var e = ecartee(x); if (e) gardes[x.id] = e });
+    gardes[id] = { reason: raison, body: f.body };
+    state.dismissed = gardes;
+    enregistrer();
+    majFil(id);
+  }
+
+  function retablir(id) {
+    if (state.dismissed) delete state.dismissed[id];
+    enregistrer();
+    majFil(id);
+  }
+
+  function filEcarte(f, e, prefixe) {
+    return '<div class="thread dismissed" id="' + prefixe + esc(f.id) + '"><details class="thread-comment">' +
+      '<summary><span>This suggestion was dismissed as <b>' + esc(RAISONS[e.reason] || e.reason) +
+      '</b>.</span><span class="voir">Show suggestion</span><span class="cacher">Hide suggestion</span>' +
+      '</summary>' + message(f, true, false) + '</details></div>';
+  }
+
+  function actionsSuggestion(f) {
+    if (ecartee(f)) return '<button data-retablir="' + esc(f.id) + '">restore</button>';
+    return '<button data-rep="' + esc(f.id) + '">take up this finding</button>' +
+      '<button data-ecart="' + esc(f.id) + '">dismiss</button>';
+  }
+
+  function raisonsEcart(id) {
+    return '<span class="ecart-question">dismiss as</span>' + Object.keys(RAISONS).map(function (r) {
+      return '<button data-ecarter="' + esc(id) + '" data-raison="' + r + '">' + RAISONS[r] + '</button>';
+    }).join('') + '<button class="ecart-annuler" data-ecart-annuler="' + esc(id) + '">cancel</button>';
+  }
+
+  function corpsFil(c, readonly, prefixe) {
+    prefixe = prefixe || 'thread-';
+    var ecart = readonly && ecartee(c);
+    if (ecart) return filEcarte(c, ecart, prefixe);
     var suites = readonly ? [] : suitesDe(c);
-    var h = '<div class="thread" id="thread-' + esc(c.id) + '"><div class="thread-comment">';
+    var h = '<div class="thread" id="' + prefixe + esc(c.id) + '"><div class="thread-comment">';
     h += message(c, readonly, suites.length > 0);
+    var ancre = prefixe === 'thread-' ? 'comment-' : 'conv-comment-';
     suites.forEach(function (s) {
-      h += '<div class="thread-reply" id="comment-' + esc(s.id) + '">' + message(s, false, false) + '</div>';
+      h += '<div class="thread-reply" id="' + ancre + esc(s.id) + '">' + message(s, false, false) + '</div>';
     });
     if (!readonly && envoyes[c.id]) {
       h += '<div class="thread-actions"><button data-reply="' + esc(c.id) + '">Reply</button></div>';
@@ -1120,7 +1237,8 @@ JS = r"""
     var rep = D.replies[c.id], sev = c.origin ? 'suggestion' : (SEVS[c.type] || 'nitpick');
     var h = '<div class="comment-head"><span class="who">' + (c.origin ? esc(c.origin.tool) : 'you') + '</span>';
     h += c.ask ? '<span class="sev-tag" data-sev="question">Ask Claude</span>'
-       : '<span class="sev-tag" data-sev="' + sev + '">' + esc(LIBS[c.type] || c.type) + '</span>';
+       : '<span class="sev-tag" data-sev="' + sev + '">' +
+         (readonly ? 'Suggestion' : esc(LIBS[c.type] || c.type)) + '</span>';
     if (c.ask && c.ask.skill) h += '<span class="badge-outline">skill ' + esc(c.ask.skill) + '</span>';
     if (c.origin && c.origin.severity) h += '<span class="badge-outline">' + esc(c.origin.severity) + '</span>';
     if (c.origin && c.origin.state === 'dropped') h += '<span class="badge-outline">dropped below threshold</span>';
@@ -1144,7 +1262,7 @@ JS = r"""
     }
     // Deleting a sent comment would not reach the agent already handling it, and deleting a
     // replied-to one would orphan its replies.
-    var action = readonly ? '<button data-rep="' + esc(c.id) + '">take up this finding</button>'
+    var action = readonly ? actionsSuggestion(c)
        : envoyes[c.id] || suivi ? '' : '<button data-sup="' + esc(c.id) + '">delete</button>';
     if (action) h += '<div class="thread-actions">' + action + '</div>';
     return h;
@@ -1223,6 +1341,7 @@ JS = r"""
       if (!section || !insererFil(section, c)) globaux.push(corpsFil(c, lectureSeule(c)));
     });
     $('globaux').innerHTML = globaux.join('');
+    rendreConversation();
     majCompteurs();
   }
 
@@ -1330,10 +1449,15 @@ JS = r"""
   /* Re-rendering the whole review here would remove the form the reviewer may have opened
      since the question left. */
   function majFil(id) {
-    var c = trouver(id);
+    var c = trouver(id) || trouverFinding(id);
     if (c && c.inReplyTo) c = trouver(c.inReplyTo);
-    var fil = c && $('thread-' + c.id);
-    if (fil) fil.outerHTML = corpsFil(c, lectureSeule(c));
+    if (c) {
+      ['thread-', 'conv-'].forEach(function (prefixe) {
+        var fil = $(prefixe + c.id);
+        if (fil) fil.outerHTML = corpsFil(c, lectureSeule(c), prefixe);
+      });
+      majCarte(c);
+    }
     majCompteurs();
   }
 
@@ -1376,6 +1500,72 @@ JS = r"""
       });
       attendreReponses();
     }).catch(function () { enAttente = false });
+  }
+
+  function enCours() {
+    return Object.keys(relectures).map(Number).filter(function (n) { return !relectures[n].done });
+  }
+
+  function majRelecture() {
+    var b = $('relire'), occupe = enCours().length > 0;
+    b.textContent = occupe ? 'Claude is reviewing…' : 'Review with Claude';
+    b.classList.toggle('busy', occupe);
+  }
+
+  /* Re-rendering every thread here would remove the form the reviewer may be typing while Claude
+     reviews. */
+  function afficherFinding(f) {
+    if (D.findings.some(function (x) { return x.id === f.id })) return;
+    D.findings.push(f);
+    var section = sectionDe(f);
+    if (section) {
+      section.classList.remove('collapsed');
+      preparer(section);
+    }
+    if (!$('thread-' + f.id) && (!section || !insererFil(section, f))) {
+      $('globaux').insertAdjacentHTML('beforeend', corpsFil(f, true));
+    }
+    if (onglet === 'conversation' && !$('conv-' + f.id)) {
+      $('tracker-list').insertAdjacentHTML('beforeend', carte(f));
+    }
+    majCompteurs();
+  }
+
+  function annoncerFin(n) {
+    var k = D.findings.filter(function (f) { return f.id.indexOf('F' + n + '-') === 0 }).length;
+    setStatus('Claude reviewed: ' + (k ? k + ' suggestion(s)' : 'nothing to suggest'), 'praise');
+  }
+
+  var enAttenteFindings = false;
+
+  function attendreFindings() {
+    var runs = enCours();
+    if (enAttenteFindings || !server || !runs.length) return;
+    enAttenteFindings = true;
+    post('/findings', { known: D.findings.map(function (f) { return f.id }), runs: runs })
+      .then(function (r) { return r.json() }).then(function (res) {
+        enAttenteFindings = false;
+        (res.findings || []).forEach(afficherFinding);
+        (res.done || []).forEach(function (n) {
+          if (relectures[n]) relectures[n].done = true;
+          annoncerFin(n);
+        });
+        majRelecture();
+        attendreFindings();
+      }).catch(function () { enAttenteFindings = false });
+  }
+
+  function relire() {
+    var champ = $('relire-skill'), nom = champ.value.trim();
+    if (nom && !/^[\w.:\/-]{1,80}$/.test(nom)) { champ.focus(); return }
+    fermerMenus(null);
+    if (!server) { switchToFallback('no server: Claude cannot be asked to review'); return }
+    post('/agent-review', { skill: nom || null }).then(function (r) { return r.json() }).then(function (res) {
+      relectures[res.run.n] = res.run;
+      majRelecture();
+      setStatus('review asked of Claude', 'praise');
+      attendreFindings();
+    }).catch(function () { switchToFallback('server unreachable - comments kept locally') });
   }
 
   function creerLigne(section, side, line, type, body, ask) {
@@ -1529,12 +1719,22 @@ JS = r"""
     requestAnimationFrame(function () { replacementPrevu = false; replacerAjout() });
   }, { passive: true });
 
+  function fermerMenus(garde) {
+    document.querySelectorAll('.menu-wrap').forEach(function (w) {
+      if (w === garde) return;
+      w.querySelector('.menu').hidden = true;
+      w.querySelector('[aria-expanded]').setAttribute('aria-expanded', 'false');
+    });
+  }
+
+  function basculerMenu(bouton, menu) {
+    fermerMenus(bouton.closest('.menu-wrap'));
+    menu.hidden = !menu.hidden;
+    bouton.setAttribute('aria-expanded', String(!menu.hidden));
+  }
+
   document.addEventListener('click', function (e) {
-    var menu = $('settings-menu');
-    if (!e.target.closest('.menu-wrap') && !menu.hidden) {
-      menu.hidden = true;
-      $('settings').setAttribute('aria-expanded', 'false');
-    }
+    fermerMenus(e.target.closest('.menu-wrap'));
 
     var chev = e.target.closest('.chevron');
     if (chev) {
@@ -1591,7 +1791,7 @@ JS = r"""
 
     var reponse = e.target.closest('[data-reply]');
     if (reponse) {
-      var racine = trouver(reponse.dataset.reply), fil = $('thread-' + reponse.dataset.reply);
+      var racine = trouver(reponse.dataset.reply), fil = reponse.closest('.thread');
       if (!racine || !fil) return;
       var fils = [racine].concat(suitesDe(racine)), dernier = fils[fils.length - 1];
       var ligne = fil.closest('tr');
@@ -1601,9 +1801,18 @@ JS = r"""
       return;
     }
 
+    var ecart = e.target.closest('[data-ecart]');
+    if (ecart) { ecart.parentNode.innerHTML = raisonsEcart(ecart.dataset.ecart); return }
+    var raison = e.target.closest('[data-ecarter]');
+    if (raison) { ecarter(raison.dataset.ecarter, raison.dataset.raison); return }
+    var annuler = e.target.closest('[data-ecart-annuler]');
+    if (annuler) { majFil(annuler.dataset.ecartAnnuler); return }
+    var retour = e.target.closest('[data-retablir]');
+    if (retour) { retablir(retour.dataset.retablir); return }
+
     var rep = e.target.closest('[data-rep]');
     if (rep) {
-      var trouve = D.findings.filter(function (x) { return x.id === rep.dataset.rep })[0];
+      var trouve = trouverFinding(rep.dataset.rep);
       if (trouve) {
         var c = JSON.parse(JSON.stringify(trouve));
         c.reprisDe = trouve.id;
@@ -1646,11 +1855,13 @@ JS = r"""
     if (vu) poseVu(vu.closest('.file-diff'), vu.checked);
   });
 
-  $('settings').addEventListener('click', function () {
-    var menu = $('settings-menu');
-    menu.hidden = !menu.hidden;
-    $('settings').setAttribute('aria-expanded', String(!menu.hidden));
+  $('settings').addEventListener('click', function () { basculerMenu($('settings'), $('settings-menu')) });
+  $('relire').addEventListener('click', function () {
+    basculerMenu($('relire'), $('relire-menu'));
+    if (!$('relire-menu').hidden) $('relire-skill').focus();
   });
+  $('relire-go').addEventListener('click', relire);
+  $('relire-skill').addEventListener('keydown', function (e) { if (e.key === 'Enter') relire() });
   $('opt-wrap').addEventListener('change', function (e) { poseWrap(e.target.checked) });
   $('opt-tab').addEventListener('change', function (e) { poseTab(e.target.value) });
   $('opt-theme').addEventListener('change', function (e) { poseTheme(e.target.value) });
@@ -1666,6 +1877,9 @@ JS = r"""
   $('sidebar-toggle').addEventListener('click', function () { poseSidebar(!prefs.collapsed) });
   $('tab-conversation').addEventListener('click', function () { poseOnglet('conversation') });
   $('tab-files').addEventListener('click', function () { poseOnglet('files') });
+  $('ct-decide').addEventListener('click', function () {
+    this.setAttribute('aria-pressed', String($('tracker-list').classList.toggle('only-decide')));
+  });
   $('filter').addEventListener('input', function (e) { filtrer(e.target.value) });
 
   (function resize() {
@@ -1691,7 +1905,7 @@ JS = r"""
     var champ = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || '').toUpperCase());
     if (e.key === 'Escape') {
       closeForm();
-      $('settings-menu').hidden = true;
+      fermerMenus(null);
       if (champ && e.target.id === 'filter') { e.target.value = ''; filtrer(''); e.target.blur() }
       return;
     }
@@ -1805,7 +2019,7 @@ JS = r"""
 
   function heartbeat() {
     if (!server) return;
-    post('/ping', {}).then(attendreReponses).catch(function () {
+    post('/ping', {}).then(function () { attendreReponses(); attendreFindings() }).catch(function () {
       switchToFallback('server stopped - comments kept locally');
     });
   }
@@ -1817,6 +2031,8 @@ JS = r"""
     $('fallback').hidden = true;
     if (state.updated && instant(state.updated) > instant(D.comments && D.comments.updated)) enregistrer();
     attendreReponses();
+    majRelecture();
+    attendreFindings();
   }).catch(function () {
     switchToFallback(D.token ? 'server unreachable - comments kept locally'
                              : 'page opened without a server - comments kept locally');
@@ -2179,6 +2395,16 @@ def render_toolbar(model):
         '<div class="menu-item" id="opt-expand">Expand all files</div>'
         '<div class="menu-item" id="opt-collapse">Collapse all files</div>'
         '</div></span>'
+        '<span class="menu-wrap">'
+        '<button class="btn btn-sm" id="relire" aria-expanded="false"'
+        ' title="ask Claude to review the diff and suggest comments">Review with Claude</button>'
+        '<div class="menu relire-menu" id="relire-menu" hidden>'
+        '<p>Claude reviews the whole diff and suggests comments as it goes. Take up the ones you '
+        'agree with: only those reach the code.</p>'
+        '<input class="input" id="relire-skill" maxlength="80"'
+        ' placeholder="through a skill (optional), e.g. code-review">'
+        '<button class="btn btn-sm btn-primary" id="relire-go">Start review</button>'
+        '</div></span>'
         '<button class="btn btn-sm" id="global" title="comment on the review as a whole">'
         '+ Global</button>'
         '<button class="btn btn-sm" id="regen" title="re-collect the diff">↻</button>'
@@ -2203,7 +2429,7 @@ def render_tabs(model):
     )
 
 
-def render(model, comments, findings, replies, token, sent=(), sources=None):
+def render(model, comments, findings, replies, token, sent=(), sources=None, relectures=()):
     body, restant = [], GLOBAL_CAP
     for f in sorted(model["files"], key=lambda f: tree_order(f["path"])):
         html_f, shown = render_file(f, restant, (sources or {}).get(f["index"]))
@@ -2213,7 +2439,7 @@ def render(model, comments, findings, replies, token, sent=(), sources=None):
     donnees = {
         "repo": model["repo"], "base": model["base"], "token": token or "",
         "comments": comments, "findings": findings, "replies": replies, "sent": list(sent),
-        "expandStep": EXPAND_STEP,
+        "runs": list(relectures), "expandStep": EXPAND_STEP,
         "files": [{"path": f["path"], "fingerprint": f["fingerprint"]}
                   for f in model["files"]],
     }
@@ -2243,6 +2469,8 @@ def render(model, comments, findings, replies, token, sent=(), sources=None):
         'line from the <b>Files changed</b> tab.</p>'
         '<div class="tracker" id="tracker" hidden>'
         '<div class="tracker-head">Comments<span class="tracker-counts">'
+        '<button class="ct-decide" id="ct-decide" aria-pressed="false" hidden'
+        ' title="show only the Claude suggestions not taken up nor dismissed">0 to decide</button>'
         '<span class="ct-pending" id="ct-pending">0 not sent</span>'
         '<span class="ct-open" id="ct-open">0 open</span>'
         '<span class="ct-replied" id="ct-replied">0 replied</span>'
@@ -2315,17 +2543,25 @@ def typed(value, type_attendu):
 
 def load_findings(path):
     """Findings from another reviewer, normalised into read-only comments."""
-    data = read_json(Path(path)) if path else None
-    if not data:
+    return findings_from(read_json(Path(path)) if path else None, "F")
+
+
+def findings_from(data, prefix):
+    """Read while Claude may be writing it: an entry skipped rather than raised keeps the review
+    saving, and a body cut to MAX_BODY keeps sanitize_state accepting it once taken over."""
+    if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
         return []
-    source = data.get("source") or "findings"
+    source = typed(data.get("source"), str) or "findings"
     out = []
-    for i, f in enumerate(data.get("findings") or []):
+    for i, f in enumerate(data["findings"][:MAX_COMMENTS]):
+        if not isinstance(f, dict):
+            continue
         fichier, ligne = typed(f.get("file"), str), typed(f.get("line"), int)
-        texte = [typed(f.get(k), str) for k in ("finding", "recommendation")]
+        texte = [t.strip() for t in (typed(f.get(k), str) for k in ("finding", "recommendation"))
+                 if t and t.strip()]
         out.append({
-            "id": f"F{i + 1}",
-            "scope": "line" if ligne else ("file" if fichier else "global"),
+            "id": f"{prefix}{i + 1}",
+            "scope": "global" if not fichier else ("line" if ligne else "file"),
             "type": "fix",
             "side": "new",
             "file": fichier,
@@ -2335,8 +2571,8 @@ def load_findings(path):
             "anchor": typed(f.get("extrait"), str),
             "anchorOffset": 0,
             "fingerprint": None,
-            "body": " — ".join(x for x in texte if x) or "(finding with no text)",
-            "origin": {"tool": str(source), "axis": typed(f.get("axis"), str),
+            "body": (" — ".join(texte) or "(finding with no text)")[:MAX_BODY],
+            "origin": {"tool": source, "axis": typed(f.get("axis"), str),
                         "severity": typed(f.get("severity"), str),
                         "state": typed(f.get("state"), str)},
             "state": "open",
@@ -2350,6 +2586,51 @@ def index_findings(findings, model):
         if f["file"] in index:
             f["fichier_index"] = index[f["file"]]
     return findings
+
+
+def gather_findings(path, relectures, model):
+    return index_findings(load_findings(path) + [f for r in relectures for f in r.findings], model)
+
+
+class Relecture:
+    """Read in one go: done and findings read apart could show a run done without its last
+    findings."""
+
+    FICHIER = re.compile(r"^findings-(\d{1,6})\.json$")
+
+    def __init__(self, n, done, findings):
+        self.n = n
+        self.done = done
+        self.findings = findings
+
+    @staticmethod
+    def fichier(out, n):
+        return out / f"findings-{n}.json"
+
+    @classmethod
+    def lire(cls, out, n):
+        data = read_json(cls.fichier(out, n))
+        data = data if isinstance(data, dict) else {}
+        return cls(n, data.get("done") is True, findings_from(data, f"F{n}-"))
+
+    @classmethod
+    def numeros(cls, out):
+        trouves = (cls.FICHIER.match(p.name) for p in out.glob("findings-*.json"))
+        return sorted(int(m.group(1)) for m in trouves if m)
+
+    @classmethod
+    def toutes(cls, out):
+        return [cls.lire(out, n) for n in cls.numeros(out)]
+
+    @classmethod
+    def ouvrir(cls, out, skill):
+        n = max(cls.numeros(out) or [0]) + 1
+        write_atomic(cls.fichier(out, n), json.dumps(
+            {"source": "Claude", "skill": skill, "done": False, "findings": []}, indent=2) + "\n")
+        return cls(n, False, [])
+
+    def vers_page(self):
+        return {"n": self.n, "done": self.done}
 
 
 def load_replies(dossier):
@@ -2420,6 +2701,7 @@ COMMENT_KEYS = {
     "reprisDe", "ask", "inReplyTo",
 }
 COMMENT_ID = re.compile(r"^[CF]\d{1,6}$")
+FINDING_ID = re.compile(r"^F\d{1,6}(?:-\d{1,6})?$")
 FIELD_TYPES = {
     "file": str, "state": str, "deposeA": str, "reprisDe": str, "inReplyTo": str,
     "anchor": str, "hunk": str, "fingerprint": str, "origin": dict, "ask": dict,
@@ -2427,6 +2709,7 @@ FIELD_TYPES = {
 }
 SCOPES = {"line", "range", "file", "global"}
 TYPES = {"fix", "followUp", "workflowNote"}
+DISMISS_REASONS = {"not-relevant", "duplicate", "outdated"}
 MAX_BODY = 8000
 MAX_COMMENTS = 500
 SKILL = re.compile(r"^[\w.:/-]{1,80}$", re.ASCII)
@@ -2441,6 +2724,41 @@ def awaited_ids(raw):
     if not all(isinstance(i, str) and COMMENT_ID.match(i) for i in ids):
         raise ValueError("invalid id")
     return set(ids)
+
+
+def awaited_findings(raw):
+    if not isinstance(raw, dict):
+        raise ValueError("object expected")
+    connus, runs = raw.get("known"), raw.get("runs")
+    if not isinstance(connus, list) or \
+            not all(isinstance(i, str) and FINDING_ID.match(i) for i in connus):
+        raise ValueError("known: list of finding ids expected")
+    if not isinstance(runs, list) or len(runs) > MAX_COMMENTS or \
+            not all(type(n) is int and 0 <= n < 10 ** 6 for n in runs):
+        raise ValueError("runs: list of review numbers expected")
+    return set(connus), set(runs)
+
+
+def requested_skill(raw):
+    if not isinstance(raw, dict):
+        raise ValueError("object expected")
+    skill = raw.get("skill")
+    if skill is not None and not (isinstance(skill, str) and SKILL.match(skill)):
+        raise ValueError("invalid skill")
+    return skill
+
+
+def sanitize_dismissed(raw):
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict) or len(raw) > MAX_COMMENTS:
+        raise ValueError("dismissed: object expected")
+    for fid, e in raw.items():
+        if not FINDING_ID.match(fid) or not isinstance(e, dict) or set(e) != {"reason", "body"} \
+                or not isinstance(e["reason"], str) or e["reason"] not in DISMISS_REASONS \
+                or not isinstance(e["body"], str) or len(e["body"]) > MAX_BODY:
+            raise ValueError(f"invalid dismissal of {fid[:20]}")
+    return raw
 
 
 def sanitize_state(raw):
@@ -2500,6 +2818,7 @@ def sanitize_state(raw):
         "updated": datetime.now().astimezone().isoformat(timespec="seconds"),
         "n": max([int(c["id"][1:]) for c in propres if c["id"].startswith("C")] or [0]),
         "comments": propres,
+        "dismissed": sanitize_dismissed(raw.get("dismissed")),
     }
 
 
@@ -2537,10 +2856,11 @@ class Review:
         """The diff stays frozen; the comments do not. Served without this after a save, the page
         hands a refresh back the state the server started with, and the review only survives in
         localStorage."""
-        findings = index_findings(load_findings(self.findings), self.model)
-        page = render(self.model, read_json(self.out / "comments.json"), findings,
+        relectures = Relecture.toutes(self.out)
+        page = render(self.model, read_json(self.out / "comments.json"),
+                      gather_findings(self.findings, relectures, self.model),
                       load_replies(self.out / "replies"), self.token, sent_ids(self.lots),
-                      self.sources)
+                      self.sources, [r.vers_page() for r in relectures])
         self.blob = page.encode("utf-8")
         write_atomic(self.out / "review.html",
                         page.replace(f'"token": "{self.token}"', '"token": ""'))
@@ -2593,6 +2913,28 @@ class Review:
                         if cid in ids}
             if trouvees or time.time() >= fin:
                 return trouvees
+            time.sleep(REPLY_STEP)
+
+    def demander_relecture(self, skill):
+        """Two clicks at once would each open the same review number."""
+        with self.verrou:
+            relecture = Relecture.ouvrir(self.out, skill)
+            todo = self.out / f"review-{relecture.n}.md"
+            write_review_request(self, relecture.n, skill, todo)
+            via = f", through the `{skill}` skill" if skill else ""
+            self.signaler(f"review {relecture.n}: the whole diff{via} - to handle: {todo}")
+            return relecture.vers_page()
+
+    def attendre_findings(self, connus, en_cours):
+        """Every review is read, not only the awaited ones: a review asked while this request is
+        held would otherwise show nothing until it times out."""
+        fin = time.time() + REPLY_WAIT
+        while True:
+            relectures = Relecture.toutes(self.out)
+            nouveaux = [f for r in relectures for f in r.findings if f["id"] not in connus]
+            finies = [r.n for r in relectures if r.done and r.n in en_cours]
+            if nouveaux or finies or time.time() >= fin:
+                return {"findings": index_findings(nouveaux, self.model), "done": finies}
             time.sleep(REPLY_STEP)
 
     def terminer(self, state):
@@ -2698,6 +3040,51 @@ is waiting on that file and shows it in the thread the moment it lands.
 **Do not regenerate the page and do not stop the server**: the review goes on.
 """
 
+REVIEW_PROTOCOL = """
+## How to review
+
+**You suggest, the developer decides.** Each finding shows up on the page as a suggestion; only the
+ones the developer takes up come back, as regular comments in a later batch. So **do not change the
+code**, do not regenerate the page and do not stop the server.
+
+**If you wrote this diff, do not review it yourself**: hand this file to a fresh subagent. An author
+rereads what they meant to write, not what they wrote.
+
+A review naming a skill is done **through that skill**: invoke it first. A skill that does not exist
+is said so in a global finding, never silently replaced.
+
+**What deserves a finding** is what a senior reviewer would hold the merge for, or ask about: a bug,
+an edge case that breaks, a risk, a missing test, a misplaced responsibility, a misleading name. Not
+what a linter catches, and no praise: five real findings beat thirty nitpicks.
+
+**Anchor on `diff.json`, not on the working tree.** It is the diff frozen when the page was
+generated, the one the developer is reading; the working tree may have moved since - a batch may be
+being applied right now. Read the code around it for context, but take the anchor from `diff.json`:
+every hunk line carries `t` (`add`, `ctx`, `del`), `after` (its number in the new file) and `txt`.
+A finding goes on an `add` or `ctx` line, with `line` set to its `after` and `extrait` to its `txt`,
+verbatim. A deleted line cannot carry one: use the nearest line of the new side. Without `line` the
+finding is on the whole file; without `file`, on the whole review.
+
+**Write each finding as soon as it is ready**: the page waits on the findings file and shows a new
+finding the moment it lands. Rewrite the whole file each time, `source` and `skill` left as they
+are, **appending only, never reordering nor removing**: a finding's id is its position, and the
+developer may already have taken one up.
+
+```json
+{ "source": "Claude", "skill": null, "done": false, "findings": [
+  { "file": "src/Billing/Invoice.php", "line": 42, "extrait": "the line's txt, verbatim",
+    "severity": "major", "finding": "what is wrong, and why it matters",
+    "recommendation": "what to do about it" }
+] }
+```
+
+`severity` is one of `blocking`, `major`, `minor`, `nitpick`; `finding` and `recommendation` are
+markdown.
+
+**End by setting `"done": true`**, even with no finding at all: until then the page shows Claude as
+still reviewing.
+"""
+
 FINISH_REVIEW = """
 **To finish**: replay the project's own check (`grep -E '^[a-z-]+:' Makefile`, typically
 `make quality` then the tests) and never claim green without the command's output. Then regenerate
@@ -2781,6 +3168,40 @@ def write_todo(review, state, entrees, cible, fin, note=None, protocole=PROTOCOL
         lines.append("")
 
     lines += [protocole.strip(), "", fin.strip()]
+    write_atomic(cible, "\n".join(lines) + "\n")
+
+
+def dismissed_findings(state, findings):
+    """The rule `ecartee` applies on the page: a dismissal holds for the body it was made on."""
+    ecarts = (state.get("dismissed") if isinstance(state, dict) else None) or {}
+    return [(f, ecarts[f["id"]]["reason"]) for f in findings
+            if f["id"] in ecarts and ecarts[f["id"]]["body"] == f["body"]]
+
+
+def write_review_request(review, n, skill, cible):
+    t, out = review.model["totals"], review.out
+    lines = [
+        f"# Review of the whole diff asked of Claude - review {n}",
+        "",
+        f"Repository `{review.model['repo']}`, base `{review.model['base']}`: {t['files']} file(s), "
+        f"+{t['additions']}/-{t['deletions']}.",
+        "",
+        f"- the diff, as the page shows it: `{out / 'diff.json'}`",
+        f"- the developer's own comments, if any - not to be repeated: `{out / 'comments.json'}`",
+        f"- **your findings go to** `{Relecture.fichier(out, n)}`",
+    ]
+    if skill:
+        lines.append(f"- review **through the `{skill}` skill**: invoke it first")
+    ecartees = dismissed_findings(read_json(out / "comments.json"),
+                                  gather_findings(review.findings, Relecture.toutes(out), review.model))
+    if ecartees:
+        lines += ["", "## Dismissed by the developer - not to be raised again", ""]
+        for f, raison in ecartees:
+            place = (f"`{f['file']}`" + (f", line {f['line']}" if f["line"] else "")
+                     if f["file"] else "the whole review")
+            lines.append(f"- {place} - {raison.replace('-', ' ')}")
+            lines += quoted(f["body"], "  ")
+    lines += ["", REVIEW_PROTOCOL.strip()]
     write_atomic(cible, "\n".join(lines) + "\n")
 
 
@@ -2875,6 +3296,25 @@ def make_handler(review, stop):
                     return self.refuser(400, f"ids refused: {e}")
                 return self.repondre(200, json.dumps(
                     {"replies": review.attendre_reponses(ids)}, ensure_ascii=False).encode("utf-8"))
+
+            if self.path == "/agent-review":
+                try:
+                    skill = requested_skill(json.loads(raw.decode("utf-8", errors="replace")))
+                except (ValueError, UnicodeError) as e:
+                    return self.refuser(400, f"review refused: {e}")
+                relecture = review.demander_relecture(skill)
+                review.rendre()
+                return self.repondre(200, json.dumps(
+                    {"ok": True, "run": relecture}, ensure_ascii=False).encode("utf-8"))
+
+            if self.path == "/findings":
+                try:
+                    connus, en_cours = awaited_findings(
+                        json.loads(raw.decode("utf-8", errors="replace")))
+                except (ValueError, UnicodeError) as e:
+                    return self.refuser(400, f"findings refused: {e}")
+                return self.repondre(200, json.dumps(
+                    review.attendre_findings(connus, en_cours), ensure_ascii=False).encode("utf-8"))
 
             if self.path in ("/comments", "/batch", "/ask", "/done"):
                 try:
@@ -3107,7 +3547,8 @@ def main():
     if a.findings:
         write_atomic(out / "findings.json",
                         Path(a.findings).read_text(encoding="utf-8"))
-    findings = index_findings(load_findings(a.findings or (out / "findings.json")), model)
+    relectures = Relecture.toutes(out)
+    findings = gather_findings(a.findings or (out / "findings.json"), relectures, model)
     comments = read_json(out / "comments.json")
     replies = load_replies(out / "replies")
     lots = read_json(out / "batches.json")
@@ -3115,7 +3556,7 @@ def main():
     page = out / "review.html"
     write_atomic(page, render(model, comments, findings, replies, None,
                               sent_ids(lots if isinstance(lots, list) else []),
-                              hidden_sources(repo, model)))
+                              hidden_sources(repo, model), [r.vers_page() for r in relectures]))
     t = model["totals"]
     print(f"{t['files']} file(s), +{t['additions']}/-{t['deletions']}")
     print(f"file://{page}")
