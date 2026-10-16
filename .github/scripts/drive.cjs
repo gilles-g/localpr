@@ -33,6 +33,12 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
   expect('pure rename keeps its note',
     (await page.locator('.file-diff[data-path="moved.txt"] .file-diff-body').innerText()).includes('rename detected'));
   expect('quoted names render', (await page.locator('.file-diff[data-path=\'we"ird.txt\'], .file-diff[data-path="back\\\\slash.txt"]').count()) === 2);
+  expect('a hidden `<!-- <script>` line is kept in its gap and swallows nothing',
+    (await page.locator('.file-diff').count()) === model.files.length &&
+    (await page.evaluate(() => {
+      const gaps = document.querySelector('.file-diff[data-path="page.html"] script.gaps');
+      return !!gaps && JSON.stringify(JSON.parse(gaps.textContent)).includes('<!-- <script>');
+    })));
 
   // comment on a new-side line
   const keep = page.locator('.file-diff[data-path="keep.txt"]');
@@ -177,18 +183,22 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
 
   await page.click('#relire');
   await page.locator('#relire-skill').fill('code-review');
+  await page.locator('#relire-model').selectOption('sonnet');
+  await page.locator('#relire-effort').selectOption('high');
   await page.click('#relire-go');
   await page.waitForTimeout(800);
   const revue = fs.readFileSync(path.join(out, 'events.log'), 'utf8')
-    .match(/^review (\d+): the whole diff, through the `code-review` skill - to handle: (.+)$/m);
-  expect('a review asked of Claude is announced', !!revue && fs.existsSync(revue[2]));
+    .match(/^review (\d+): the whole diff, through the `code-review` skill, model `sonnet`, effort `high` - to handle: (.+)$/m);
+  expect('a review asked of Claude is announced, with its model and effort', !!revue && fs.existsSync(revue[2]));
   const run = revue ? revue[1] : '0';
   const runFile = path.join(out, `findings-${run}.json`);
-  expect('the review request points at its findings file and its skill', !!revue &&
+  expect('the review request points at its findings file, its skill, its model and effort', !!revue &&
     fs.readFileSync(revue[2], 'utf8').includes(runFile) &&
-    fs.readFileSync(revue[2], 'utf8').includes('through the `code-review` skill'));
-  expect('the findings file is opened, not done', fs.existsSync(runFile) &&
-    JSON.parse(fs.readFileSync(runFile, 'utf8')).done === false);
+    fs.readFileSync(revue[2], 'utf8').includes('through the `code-review` skill') &&
+    fs.readFileSync(revue[2], 'utf8').includes('asked of model `sonnet`, effort `high`'));
+  const ouvert = fs.existsSync(runFile) ? JSON.parse(fs.readFileSync(runFile, 'utf8')) : {};
+  expect('the findings file is opened, not done, with the effort asked and the model left to its writer',
+    ouvert.done === false && ouvert.model === null && ouvert.effort === 'high');
   expect('the button says Claude is reviewing', (await page.locator('#relire').innerText()) === 'Claude is reviewing…');
   await page.click('#global');
   await page.locator('.form-row-inline textarea').fill('typed while Claude reviews');
@@ -197,7 +207,8 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
       finding: 'Why **uppercase**?', recommendation: 'keep it lowercase' },
     { severity: 'minor', finding: 'The rename deserves a note in the changelog.' },
   ];
-  fs.writeFileSync(runFile, JSON.stringify({ source: 'Claude', skill: 'code-review', done: false, findings: suggestions }));
+  const enTete = { source: 'Claude', skill: 'code-review', model: 'claude-sonnet-5-5', effort: 'high' };
+  fs.writeFileSync(runFile, JSON.stringify({ ...enTete, done: false, findings: suggestions }));
   await page.waitForTimeout(1500);
   const surLigne = renamed.locator(`.thread-row #thread-F${run}-1`);
   expect('a suggestion shows up under its line without a reload', (await surLigne.count()) === 1 &&
@@ -205,11 +216,13 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
   expect('a suggestion carries its author and severity', (await surLigne.locator('.who').innerText()) === 'Claude' &&
     (await surLigne.locator('.sev-tag').innerText()) === 'Suggestion' &&
     (await surLigne.locator('.badge-outline').allInnerTexts()).includes('major'));
+  expect('a suggestion names the model and effort that wrote it',
+    (await surLigne.locator('.badge-outline').allInnerTexts()).includes('claude-sonnet-5-5 · effort high'));
   expect('a suggestion without a file is global', (await page.locator(`#globaux #thread-F${run}-2`).count()) === 1);
   expect('the form being typed survives the suggestions',
     (await page.locator('.form-row-inline textarea').inputValue()) === 'typed while Claude reviews');
   await page.locator('.form-row-inline [data-cancel]').click();
-  fs.writeFileSync(runFile, JSON.stringify({ source: 'Claude', skill: 'code-review', done: true, findings: suggestions }));
+  fs.writeFileSync(runFile, JSON.stringify({ ...enTete, done: true, findings: suggestions }));
   await page.waitForTimeout(1500);
   expect('the end of the review is announced',
     (await page.locator('#state-enreg').innerText()).includes('Claude reviewed: 2 suggestion(s)') &&
@@ -253,6 +266,9 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
   await page.waitForTimeout(800);
   const suivante = [...fs.readFileSync(path.join(out, 'events.log'), 'utf8')
     .matchAll(/^review (\d+): .* - to handle: (.+)$/gm)].pop();
+  expect('a review left on the defaults names no model nor effort', !!suivante &&
+    !/, (model|effort) `/.test(suivante[0]) &&
+    !/asked of (model|effort) `/.test(fs.readFileSync(suivante[2], 'utf8')));
   expect('the next review is told what was dismissed', !!suivante && suivante[1] !== run &&
     fs.readFileSync(suivante[2], 'utf8')
       .includes('- the whole review - outdated\n  > The rename deserves a note in the changelog.'));
