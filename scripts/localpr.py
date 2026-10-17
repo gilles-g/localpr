@@ -1241,6 +1241,12 @@ JS = r"""
          (readonly ? 'Suggestion' : esc(LIBS[c.type] || c.type)) + '</span>';
     if (c.ask && c.ask.skill) h += '<span class="badge-outline">skill ' + esc(c.ask.skill) + '</span>';
     if (c.origin && c.origin.severity) h += '<span class="badge-outline">' + esc(c.origin.severity) + '</span>';
+    if (c.origin && (c.origin.model || c.origin.effort)) {
+      var moteur = [c.origin.model,
+                    c.origin.effort ? 'effort ' + c.origin.effort : 'default effort'];
+      h += '<span class="badge-outline" title="the model and effort that wrote it">' +
+        esc(moteur.filter(Boolean).join(' · ')) + '</span>';
+    }
     if (c.origin && c.origin.state === 'dropped') h += '<span class="badge-outline">dropped below threshold</span>';
     if (!c.inReplyTo) {
       if (c.side === 'old') h += '<span class="badge-outline">deleted line</span>';
@@ -1508,7 +1514,7 @@ JS = r"""
 
   function majRelecture() {
     var b = $('relire'), occupe = enCours().length > 0;
-    b.textContent = occupe ? 'Claude is reviewing…' : 'Review with Claude';
+    $('relire-label').textContent = occupe ? 'Claude is reviewing…' : 'Review with Claude';
     b.classList.toggle('busy', occupe);
   }
 
@@ -1560,7 +1566,11 @@ JS = r"""
     if (nom && !/^[\w.:\/-]{1,80}$/.test(nom)) { champ.focus(); return }
     fermerMenus(null);
     if (!server) { switchToFallback('no server: Claude cannot be asked to review'); return }
-    post('/agent-review', { skill: nom || null }).then(function (r) { return r.json() }).then(function (res) {
+    post('/agent-review', {
+      skill: nom || null,
+      model: $('relire-model').value || null,
+      effort: $('relire-effort').value || null
+    }).then(function (r) { return r.json() }).then(function (res) {
       relectures[res.run.n] = res.run;
       majRelecture();
       setStatus('review asked of Claude', 'praise');
@@ -2055,6 +2065,12 @@ def esc(x):
     return html.escape(str(x if x is not None else ""))
 
 
+def json_in_script(value):
+    """Escaping `</` alone is not enough: `<!--` then `<script` puts the HTML parser in its
+    double-escaped state, where the closing `</script>` no longer ends the element."""
+    return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c")
+
+
 LANGUAGES = {
     ".php": "php", ".phtml": "php",
     ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript", ".jsx": "javascript",
@@ -2110,6 +2126,33 @@ ICON_GEAR = octicon('<path d="M8 10.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z" fill
 ICON_PANEL = octicon('<path d="M2.25 2.5h11.5c.41 0 .75.34.75.75v9.5c0 .41-.34.75-.75.75H2.25a.75'
                      '.75 0 0 1-.75-.75v-9.5c0-.41.34-.75.75-.75ZM6 2.5v11" fill="none"'
                      ' stroke="currentColor" stroke-width="1.3"/>')
+ICON_CLAUDE = ('<svg class="octicon claude-mark" width="16" height="16"'
+               ' viewBox="88 92 510 510" aria-hidden="true"><path d="'
+               'M189.5 430.7L289 375L290.6 370.1L289 367.4H284L267.4 366.4L210.6 364.8'
+               'L161.4 362.8L113.6 360.3L101.6 357.7L90.4 342.8L91.5 335.4L101.6 328.6'
+               'L116.1 329.9L148 332.1L196.1 335.4L230.8 337.5L282.4 342.8H290.6L291.7 339.5'
+               'L289 337.5L286.8 335.4L237.1 301.7L183.2 266.3L155.1 245.7L140.1 235.3'
+               'L132.4 225.7L129.2 204.4L142.8 189.2L161.4 190.5L166 191.8L184.9 206.2L225 237.4'
+               'L277.5 275.9L285.1 282.2L288.2 280.1L288.7 278.7L285.1 272.8L256.7 221.4'
+               'L226.4 169L212.7 147.2L209.2 134.2C207.8 128.8 207 124.3 207 118.8L222.6 97.5'
+               'L231.3 94.7L252.4 97.5L261.1 105.1L274.2 135L295.2 181.9L328 245.7L337.6 264.7'
+               'L342.8 282.2L344.7 287.5H347.9V284.5L350.7 248.5L355.6 204.4L360.5 147.7'
+               'L362.1 131.7L370.1 112.4L385.9 102.1L398.2 107.9L408.3 122.3L406.9 131.7'
+               'L400.9 170.7L389.2 231.8L381.5 272.8H385.9L391.1 267.5L411.9 240.2L446.5 196.6'
+               'L461.8 179.3L479.9 160.3L491.3 151.2H513.2L529 175L521.9 199.6L499.5 228'
+               'L481 252.1L454.3 287.7L437.8 316.4L439.3 318.8L443.3 318.5L503.4 305.5'
+               'L535.9 299.7L574.6 293.1L592.1 301.2L594 309.6L587.2 326.6L545.7 336.7'
+               'L497.1 346.6L424.7 363.6L423.9 364.3L424.8 365.7L457.5 368.6L471.4 369.4H505.5'
+               'L569.2 374.2L585.8 385.1L595.7 398.5L594 408.9L568.4 421.9L534 413.7L453.4 394.5'
+               'L425.8 387.6H422V389.9L444.9 412.5L487.2 450.5L540 499.6L542.7 511.8L535.9 521.4'
+               'L528.8 520.4L482.3 485.5L464.3 469.7L423.9 435.5H421.1V439.1L430.4 452.8'
+               'L479.9 527L482.3 549.8L478.8 557.2L465.9 561.7L452 559.2L422.8 518.4L393 472.8'
+               'L369 431.7L366.1 433.6L351.8 586.3L345.2 594.2L329.9 600L317.1 590.4L310.3 574.7'
+               'L317.1 543.5L325.3 502.9L331.8 470.8L337.8 430.7L341.5 417.3L341.2 416.4'
+               'L338.3 416.9L308.1 458.3L262.2 520.4L225.9 559.2L217.1 562.7L202.1 554.9'
+               'L203.5 541L211.9 528.5L262.2 464.7L292.5 424.9L312 402.1L311.9 398.8L310.8 398.7'
+               'L177.2 485.7L153.5 488.8L143.1 479.1L144.5 463.4L149.4 458.3L189.5 430.7Z'
+               '"/></svg>')
 
 BOX = ('<rect x="2.3" y="2.3" width="11.4" height="11.4" rx="2.6" fill="none"'
        ' stroke="currentColor" stroke-width="1.3"/>')
@@ -2254,7 +2297,7 @@ def render_file(f, restant, source=None):
         inner = f'<table class="diff-table"><tbody>{lignes}</tbody></table>'
         if trous:
             inner += ('<script type="application/json" class="gaps">'
-                      + json.dumps(trous, ensure_ascii=False).replace("</", "<\\/")
+                      + json_in_script(trous)
                       + "</script>")
         if coupe:
             inner += (f'<div class="truncated">… {fmt_num(total - shown)} more line(s), '
@@ -2360,6 +2403,11 @@ def render_tree(model):
             + '<div class="tree-empty" id="tree-empty" hidden>no file matches</div></div>')
 
 
+def select_options(ident, values):
+    return (f'<select id="{ident}"><option value="">default</option>'
+            + "".join(f"<option>{v}</option>" for v in values) + "</select>")
+
+
 def render_toolbar(model):
     t = model["totals"]
     base = esc(model["base"]) + (f' · {esc(model["head"])}' if model["head"] else "")
@@ -2397,12 +2445,17 @@ def render_toolbar(model):
         '</div></span>'
         '<span class="menu-wrap">'
         '<button class="btn btn-sm" id="relire" aria-expanded="false"'
-        ' title="ask Claude to review the diff and suggest comments">Review with Claude</button>'
+        f' title="ask Claude to review the diff and suggest comments">{ICON_CLAUDE}'
+        '<span id="relire-label">Review with Claude</span></button>'
         '<div class="menu relire-menu" id="relire-menu" hidden>'
         '<p>Claude reviews the whole diff and suggests comments as it goes. Take up the ones you '
         'agree with: only those reach the code.</p>'
         '<input class="input" id="relire-skill" maxlength="80"'
         ' placeholder="through a skill (optional), e.g. code-review">'
+        '<div class="relire-opts">'
+        f'<label>Model{select_options("relire-model", MODELS)}</label>'
+        f'<label>Effort{select_options("relire-effort", EFFORTS)}</label>'
+        '</div>'
         '<button class="btn btn-sm btn-primary" id="relire-go">Start review</button>'
         '</div></span>'
         '<button class="btn btn-sm" id="global" title="comment on the review as a whole">'
@@ -2502,7 +2555,7 @@ def render(model, comments, findings, replies, token, sent=(), sources=None, rel
         # Before the first paint and before window.LOCALPR, or the theme flashes. The newest of
         # the two stores wins: a page opened without a server can only write localStorage.
         + '<script>window.LOCALPR_PREFS='
-        + (json.dumps(prefs, ensure_ascii=False).replace("</", "<\\/") if prefs
+        + (json_in_script(prefs) if prefs
            else "null") + ';try{'
         'var l=JSON.parse(localStorage.getItem("localpr:prefs")||"null"),f=window.LOCALPR_PREFS;'
         'var p=(!f||(l&&(l.at||"")>(f.at||"")))?l:f;window.LOCALPR_PREFS=p||null;'
@@ -2522,7 +2575,7 @@ def render(model, comments, findings, replies, token, sent=(), sources=None, rel
         + pied
         + "</div></main></div>"
         + "<script>window.LOCALPR="
-        + json.dumps(donnees, ensure_ascii=False).replace("</", "<\\/")
+        + json_in_script(donnees)
         + ";</script>"
         + f"<script>{read_asset('render.js')}</script>"
         + f"<script>{JS}</script>"
@@ -2552,6 +2605,9 @@ def findings_from(data, prefix):
     if not isinstance(data, dict) or not isinstance(data.get("findings"), list):
         return []
     source = typed(data.get("source"), str) or "findings"
+    model = typed(data.get("model"), str)
+    model = model if model and MODEL_ID.match(model) else None
+    effort = data.get("effort") if data.get("effort") in EFFORTS else None
     out = []
     for i, f in enumerate(data["findings"][:MAX_COMMENTS]):
         if not isinstance(f, dict):
@@ -2574,7 +2630,8 @@ def findings_from(data, prefix):
             "body": (" — ".join(texte) or "(finding with no text)")[:MAX_BODY],
             "origin": {"tool": source, "axis": typed(f.get("axis"), str),
                         "severity": typed(f.get("severity"), str),
-                        "state": typed(f.get("state"), str)},
+                        "state": typed(f.get("state"), str),
+                        "model": model, "effort": effort},
             "state": "open",
         })
     return out
@@ -2623,10 +2680,13 @@ class Relecture:
         return [cls.lire(out, n) for n in cls.numeros(out)]
 
     @classmethod
-    def ouvrir(cls, out, skill):
+    def ouvrir(cls, out, demande):
+        """`model` starts empty: pre-filled with the alias asked for, a subagent that forgot to
+        overwrite it would show the request as the author."""
         n = max(cls.numeros(out) or [0]) + 1
         write_atomic(cls.fichier(out, n), json.dumps(
-            {"source": "Claude", "skill": skill, "done": False, "findings": []}, indent=2) + "\n")
+            {"source": "Claude", "skill": demande.skill, "model": None,
+             "effort": demande.effort, "done": False, "findings": []}, indent=2) + "\n")
         return cls(n, False, [])
 
     def vers_page(self):
@@ -2713,6 +2773,9 @@ DISMISS_REASONS = {"not-relevant", "duplicate", "outdated"}
 MAX_BODY = 8000
 MAX_COMMENTS = 500
 SKILL = re.compile(r"^[\w.:/-]{1,80}$", re.ASCII)
+MODELS = ("opus", "sonnet", "haiku", "fable")
+MODEL_ID = re.compile(r"^[\w.\[\]-]{1,60}$", re.ASCII)
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 REPLY_WAIT = 25
 REPLY_STEP = 0.5
 
@@ -2739,13 +2802,40 @@ def awaited_findings(raw):
     return set(connus), set(runs)
 
 
-def requested_skill(raw):
-    if not isinstance(raw, dict):
-        raise ValueError("object expected")
-    skill = raw.get("skill")
-    if skill is not None and not (isinstance(skill, str) and SKILL.match(skill)):
-        raise ValueError("invalid skill")
-    return skill
+class DemandeRelecture:
+    def __init__(self, skill, model, effort):
+        self.skill = skill
+        self.model = model
+        self.effort = effort
+
+    @classmethod
+    def depuis(cls, raw):
+        if not isinstance(raw, dict):
+            raise ValueError("object expected")
+        skill, model, effort = raw.get("skill"), raw.get("model"), raw.get("effort")
+        if skill is not None and not (isinstance(skill, str) and SKILL.match(skill)):
+            raise ValueError("invalid skill")
+        if model is not None and model not in MODELS:
+            raise ValueError("invalid model")
+        if effort is not None and effort not in EFFORTS:
+            raise ValueError("invalid effort")
+        return cls(skill, model, effort)
+
+    def reglages(self):
+        return [f"{cle} `{v}`" for cle, v in (("model", self.model), ("effort", self.effort)) if v]
+
+    def via(self):
+        parts = ([f"through the `{self.skill}` skill"] if self.skill else []) + self.reglages()
+        return "".join(f", {p}" for p in parts)
+
+    def consignes(self):
+        lines, reglages = [], self.reglages()
+        if self.skill:
+            lines.append(f"- review **through the `{self.skill}` skill**: invoke it first")
+        if reglages:
+            lines.append(f"- asked of {', '.join(reglages)}: a subagent handed this file is "
+                         "spawned with them")
+        return lines
 
 
 def sanitize_dismissed(raw):
@@ -2915,14 +3005,14 @@ class Review:
                 return trouvees
             time.sleep(REPLY_STEP)
 
-    def demander_relecture(self, skill):
+    def demander_relecture(self, demande):
         """Two clicks at once would each open the same review number."""
         with self.verrou:
-            relecture = Relecture.ouvrir(self.out, skill)
+            relecture = Relecture.ouvrir(self.out, demande)
             todo = self.out / f"review-{relecture.n}.md"
-            write_review_request(self, relecture.n, skill, todo)
-            via = f", through the `{skill}` skill" if skill else ""
-            self.signaler(f"review {relecture.n}: the whole diff{via} - to handle: {todo}")
+            write_review_request(self, relecture.n, demande, todo)
+            self.signaler(f"review {relecture.n}: the whole diff{demande.via()}"
+                          f" - to handle: {todo}")
             return relecture.vers_page()
 
     def attendre_findings(self, connus, en_cours):
@@ -3005,7 +3095,7 @@ itself.
 
 ```json
 { "comment": "C3", "verdict": "fixed",
-  "response": "what was done, or why not - never an intention",
+  "response": "what was done, or why not, in a sentence or two - never an intention",
   "filesChanged": ["src/..."] }
 ```
 
@@ -3029,6 +3119,10 @@ exist is said so in the answer, never silently replaced.
 
 A question asked in reply carries its thread so far: answer its last message in that context, and
 do not repeat what was already said.
+
+**Answer short**: it is read in a narrow thread, under a line. The answer itself first, in a few
+sentences - no preamble, no question restated, no closing summary; code only when it is the answer,
+a few lines.
 """ + ANCHORING + """
 **Write the answer as soon as it is ready**, one file per question, in `replies/<id>.json`: the page
 is waiting on that file and shows it in the thread the moment it lands.
@@ -3053,9 +3147,33 @@ rereads what they meant to write, not what they wrote.
 A review naming a skill is done **through that skill**: invoke it first. A skill that does not exist
 is said so in a global finding, never silently replaced.
 
-**What deserves a finding** is what a senior reviewer would hold the merge for, or ask about: a bug,
-an edge case that breaks, a risk, a missing test, a misplaced responsibility, a misleading name. Not
-what a linter catches, and no praise: five real findings beat thirty nitpicks.
+**Hunt bugs first, thoroughly.** Read every hunk, and the code around it, for a wrong or inverted
+condition, an off-by-one, a missing value, dropped error handling, a removed guard, a caller the
+change breaks, a race, data reaching HTML, SQL or a shell unescaped. **A real bug is reported even
+when its trigger is narrow**; a likely one with a high stake (data loss, security) is reported too,
+saying in a few words what is unconfirmed.
+
+**Anything less than a bug earns its place** - a missing test, a misplaced responsibility, a
+misleading name, a cost - only when you can say what it will break. Every finding:
+
+- **was introduced by the diff** - what was already wrong before is not this review's business;
+- **has a trigger** - the input or state, and the wrong result it produces.
+
+**Never flag** what a linter, a formatter or a type checker catches, style, a missing docstring or
+comment, an intentional change of behaviour, a "make sure that...". No praise. Once every hunk is
+read, an empty review is a valid review. A pattern that repeats is one finding, not one per
+occurrence. Ten findings at most, three `nitpick` at most.
+
+**Written for a glance**: the developer reads each finding in a narrow thread under its line.
+
+- `finding`: one or two sentences, trigger included, the defect first. No heading, no list, no
+  preamble, no hedging, and never the line restated: the page shows it right above.
+- `recommendation`: one imperative sentence, one fix - no alternatives; code only when it is the
+  fix, three lines at most.
+- `severity`: `blocking` is wrong whatever the input, `major` wrong on a realistic input you named,
+  `minor` real but rare, `nitpick` harmless. Never inflate it, nor lower it out of doubt: what is
+  unconfirmed is said in the text. A severity that depends on a condition states it first.
+- about the code, never the author: "`total` is reset...", not "you forgot...".
 
 **Anchor on `diff.json`, not on the working tree.** It is the diff frozen when the page was
 generated, the one the developer is reading; the working tree may have moved since - a batch may be
@@ -3068,18 +3186,21 @@ finding is on the whole file; without `file`, on the whole review.
 **Write each finding as soon as it is ready**: the page waits on the findings file and shows a new
 finding the moment it lands. Rewrite the whole file each time, `source` and `skill` left as they
 are, **appending only, never reordering nor removing**: a finding's id is its position, and the
-developer may already have taken one up.
+developer may already have taken one up. Set `model` to the exact model id your system prompt
+gives you, and `effort` to the reasoning effort your context states, if it states one: the page
+shows both on every finding, as who wrote it.
 
 ```json
-{ "source": "Claude", "skill": null, "done": false, "findings": [
+{ "source": "Claude", "skill": null, "model": "claude-...", "effort": "high", "done": false,
+  "findings": [
   { "file": "src/Billing/Invoice.php", "line": 42, "extrait": "the line's txt, verbatim",
-    "severity": "major", "finding": "what is wrong, and why it matters",
-    "recommendation": "what to do about it" }
+    "severity": "major",
+    "finding": "`$total` is reset inside the page loop: an invoice longer than one page is billed for its last page only.",
+    "recommendation": "Initialise `$total` once, before the loop." }
 ] }
 ```
 
-`severity` is one of `blocking`, `major`, `minor`, `nitpick`; `finding` and `recommendation` are
-markdown.
+`finding` and `recommendation` are markdown.
 
 **End by setting `"done": true`**, even with no finding at all: until then the page shows Claude as
 still reviewing.
@@ -3178,7 +3299,7 @@ def dismissed_findings(state, findings):
             if f["id"] in ecarts and ecarts[f["id"]]["body"] == f["body"]]
 
 
-def write_review_request(review, n, skill, cible):
+def write_review_request(review, n, demande, cible):
     t, out = review.model["totals"], review.out
     lines = [
         f"# Review of the whole diff asked of Claude - review {n}",
@@ -3189,9 +3310,8 @@ def write_review_request(review, n, skill, cible):
         f"- the diff, as the page shows it: `{out / 'diff.json'}`",
         f"- the developer's own comments, if any - not to be repeated: `{out / 'comments.json'}`",
         f"- **your findings go to** `{Relecture.fichier(out, n)}`",
+        *demande.consignes(),
     ]
-    if skill:
-        lines.append(f"- review **through the `{skill}` skill**: invoke it first")
     ecartees = dismissed_findings(read_json(out / "comments.json"),
                                   gather_findings(review.findings, Relecture.toutes(out), review.model))
     if ecartees:
@@ -3299,10 +3419,11 @@ def make_handler(review, stop):
 
             if self.path == "/agent-review":
                 try:
-                    skill = requested_skill(json.loads(raw.decode("utf-8", errors="replace")))
+                    demande = DemandeRelecture.depuis(
+                        json.loads(raw.decode("utf-8", errors="replace")))
                 except (ValueError, UnicodeError) as e:
                     return self.refuser(400, f"review refused: {e}")
-                relecture = review.demander_relecture(skill)
+                relecture = review.demander_relecture(demande)
                 review.rendre()
                 return self.repondre(200, json.dumps(
                     {"ok": True, "run": relecture}, ensure_ascii=False).encode("utf-8"))

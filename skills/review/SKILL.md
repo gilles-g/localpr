@@ -50,7 +50,9 @@ is an event:
   read that `ask-<n>.md` and write each answer to `replies/<id>.json` as it is ready. Answer, do not
   change the code; a named skill is invoked first.
 - `review <n>: … - to handle: <path>` — hand that `review-<n>.md` to a **fresh subagent**, in the
-  background: the session that wrote the diff is the wrong one to review it. The subagent writes
+  background: the session that wrote the diff is the wrong one to review it. A `model` or an
+  `effort` the line names was picked by the developer on the page: spawn the subagent with it,
+  and with the default for whatever the line leaves out. The subagent writes
   `findings-<n>.json` as it goes and ends with `"done": true`; keep monitoring meanwhile.
 - `done: … - to handle: <path>` — read `TODO.md`, the comments no batch carried; stop the monitor.
 - `stopped: …` — the server died without *Finish review*; stop the monitor and say so.

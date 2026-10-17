@@ -27,6 +27,7 @@
   --done-fg: #8250df;
   --done-emphasis: #8250df;
   --done-subtle: #fbefff;
+  --claude-fg: #d97757;
   --neutral-muted: #818b981f;
   --neutral-emphasis: #59636e;
   --header-bg: #1f2328;
@@ -90,6 +91,7 @@
   --done-fg: #ab7df8;
   --done-emphasis: #8957e5;
   --done-subtle: #ab7df826;
+  --claude-fg: #d97757;
   --neutral-muted: #656c7633;
   --neutral-emphasis: #656c76;
   --header-bg: #151b23;
@@ -153,6 +155,7 @@
   --done-fg: #986ee2;
   --done-emphasis: #8256d0;
   --done-subtle: #986ee226;
+  --claude-fg: #d97757;
   --neutral-muted: #656c7633;
   --neutral-emphasis: #656c76;
   --header-bg: #151b23;

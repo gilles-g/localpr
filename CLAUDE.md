@@ -229,6 +229,11 @@ means nothing without it. A replied-to comment loses its delete button too. *Rev
 goes through `/agent-review`: `Relecture.ouvrir` numbers the review on its own sequence and
 pre-creates `findings-<n>.json`, `review-<n>.md` carries `REVIEW_PROTOCOL` (suggest, never touch the
 code, hand it to a fresh subagent if you wrote the diff, append only, end with `"done": true`).
+The skill, model and effort picked in the menu travel as one `DemandeRelecture`: to the events line
+and `review-<n>.md` for whoever spawns the subagent. `findings-<n>.json` gets the effort asked,
+which the subagent overwrites when its context states the one it runs at, and a `model` left
+`null` for it to fill with its exact id: pre-filled with the alias asked for, a subagent that
+forgot it would show the request as the author.
 That file is the review's **only state** — no registry beside it to disagree with it — read in one
 go by `Relecture.lire`, and written by the agent while the page is served: `findings_from` skips a
 malformed entry rather than raising, since every save renders it, and cuts a body to `MAX_BODY`,
@@ -276,7 +281,8 @@ anything else.
   directory, a `latin-1` file that would kill the whole page. Write in that register, or write
   nothing.
 - The HTML is assembled by concatenating f-strings; everything coming from the data goes through
-  `esc()`.
+  `esc()`, and every JSON inlined in a `<script>` through `json_in_script()`: escaping `</` alone
+  let a file's `<!-- <script>` swallow the rest of the page.
 - Threads, the comment form, the file tree's search and the comment tracker are rendered
   **client-side** (`JS`, a string inside `localpr.py`). Do not mirror their labels on the Python
   side: an earlier `SEV` / `TYPE_LABEL` pair sat there dead, and diverged.

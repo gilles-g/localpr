@@ -204,6 +204,31 @@ body {
 .relire-menu .btn {
   margin-top: 8px;
 }
+.relire-opts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 8px;
+}
+.relire-opts label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.relire-opts select {
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 4px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--canvas-default);
+  color: var(--fg-default);
+}
+.btn .claude-mark {
+  fill: var(--claude-fg);
+}
 .btn.busy {
   color: var(--fg-muted);
   font-style: italic;

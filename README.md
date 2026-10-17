@@ -11,7 +11,7 @@ the thread, and get each comment back marked fixed or refused.
 One Python script, standard library only. No service, no account, no network: the page opens
 offline.
 
-![A branch under review: file tree on the left, unified diff on the right, review progress and Finish review in the toolbar](docs/review-light.png)
+![A branch under review: file tree on the left, a Must fix comment Claude marked fixed under its line, a suggestion dismissed as duplicate folded above it](docs/review-light.png)
 
 ## Why
 
@@ -37,13 +37,16 @@ for a line that no longer exists, **anchor-lost**.
 
 ## Talk to Claude in the thread
 
+![Ask Claude now: the question leaves at once, and Claude's answer lands in the thread](docs/demo.gif)
+
 - **Ask Claude now** — tick it on a comment to send that question alone, at once, optionally
   through a skill (`dev-gourou`, …). Claude answers in the thread and does not touch the code.
 - **Reply** — under any sent thread, answer Claude back ("do what you suggested", "no, keep the
   old name"). The thread so far travels with your reply, so Claude knows what you are talking
   about.
-- **Review with Claude** — ask for a review of the whole diff, optionally through a skill. A fresh
-  agent reviews it and its suggestions land under their lines as it goes; **take up** the ones you
+- **Review with Claude** — ask for a review of the whole diff, optionally through a skill, on the
+  model and at the effort of your choice. A fresh agent reviews it and its suggestions land under
+  their lines as it goes, each naming the model and effort that wrote it; **take up** the ones you
   agree with and they become comments like yours. **Dismiss** the others as not relevant,
   duplicate or outdated: they fold away, never reach the code, and the next review is told not to
   raise them again.
@@ -51,11 +54,17 @@ for a line that no longer exists, **anchor-lost**.
   from there, or jump to it in the diff. **to decide** keeps only the suggestions still waiting on
   you, and the file tree flags the files that hold some.
 
+![Review with Claude: suggestions under their lines, each with its severity, the model and effort that wrote it, and take up or dismiss](docs/suggestions.png)
+
+![The Conversation tab: every thread with the code it is about, and the to decide filter](docs/conversation.png)
+
 ## Reading a large diff
 
 Unified or split view, light / dark / dark dimmed themes, context expanded around any hunk, files
 ticked **Viewed**, a searchable file tree, soft wrap and tab size. The page stays fluid on reviews
 of several hundred files.
+
+![Split view in the dark theme](docs/review-dark.png)
 
 ## Install
 
