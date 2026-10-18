@@ -13,6 +13,8 @@ offline.
 
 ![A branch under review: file tree on the left, a Must fix comment Claude marked fixed under its line, a suggestion dismissed as duplicate folded above it](docs/review-light.png)
 
+https://github.com/user-attachments/assets/bf2dc992-9567-4ee9-8e03-b099f0f7d164
+
 ## Why
 
 `git diff` shows the change but gives you nowhere to write. A large diff is unreadable in a
