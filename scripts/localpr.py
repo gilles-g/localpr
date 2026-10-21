@@ -71,6 +71,8 @@ GIT_HARDENING = [
     "-c", "diff.mnemonicPrefix=false",
 ]
 DIFF_OPTS = ["--no-color", "--no-ext-diff", "--no-textconv", "-U3"]
+# Secrets: an .env file would be inlined into the page and handed to the agent.
+EXCLUDED = ["--", ":(exclude,glob)**/.env", ":(exclude,glob)**/.env.*"]
 
 HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 BLOB_INDEX = re.compile(r"^index ([0-9a-f]+)\.\.")
@@ -140,7 +142,7 @@ def untracked(repo):
     same folded entry and whose contents git will not enumerate at all. Returned apart, because
     it is diffed as a whole instead of file by file.
     """
-    raw = git(repo, "ls-files", "--others", "--exclude-standard", "-z")
+    raw = git(repo, "ls-files", "--others", "--exclude-standard", "-z", *EXCLUDED)
     paths = [p for p in raw.split("\0") if p]
     return ([p for p in paths if not p.endswith("/")],
             [p for p in paths if p.endswith("/")])
@@ -174,10 +176,10 @@ def untracked_diff(repo, path):
 def collect_diff(repo, base=None):
     parts = []
     if base:
-        parts.append(git(repo, "diff", *DIFF_OPTS, f"{base}...HEAD"))
-        parts.append(git(repo, "diff", *DIFF_OPTS, "HEAD"))
+        parts.append(git(repo, "diff", *DIFF_OPTS, f"{base}...HEAD", *EXCLUDED))
+        parts.append(git(repo, "diff", *DIFF_OPTS, "HEAD", *EXCLUDED))
     elif has_head(repo):
-        parts.append(git(repo, "diff", *DIFF_OPTS, "HEAD"))
+        parts.append(git(repo, "diff", *DIFF_OPTS, "HEAD", *EXCLUDED))
     tracked = {f["path"] for f in parse_diff("".join(parts))}
     fichiers, _ = untracked(repo)
     for path in fichiers:
@@ -589,7 +591,7 @@ def numstat_totals(repo, base):
     totaux = {}
     sources = ([f"{base}...HEAD"] if base else []) + (["HEAD"] if has_head(repo) else [])
     for source in sources:
-        for line in git(repo, "diff", "--numstat", source).splitlines():
+        for line in git(repo, "diff", "--numstat", source, *EXCLUDED).splitlines():
             bouts = line.split("\t", 2)
             if len(bouts) != 3:
                 continue
