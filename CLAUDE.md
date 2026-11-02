@@ -125,6 +125,14 @@ The parts that cannot be deduced from a single file:
 - **An anchor is a window, not a line number**: the commented line ±2, with `anchorOffset`. The
   `fingerprint` (truncated sha256 of the file) says whether line numbers are still trustworthy.
   Comments with `side: "old"` (a deleted line) cannot be re-anchored: the `hunk` travels with them.
+  A range (dragged from the `+`) is `scope: "line"` plus `lineEnd`, never a scope of its own: every
+  `c.scope !== 'line'` that forgot it would have hidden the thread, where `line` alone still shows it.
+  The window holds **one side of one hunk** (`fenetre` / `lineOn`): a deleted line in a new-side
+  window is text the agent never finds, and the range's last line must sit at
+  `anchorOffset + lineEnd - line` — `sanitize_state` refuses it otherwise, `write_todo` reads it.
+  `RANGE_MAX` caps a range because every save posts the whole state, refused past `MAX_PAYLOAD`.
+  The highlight is a `sel` class on the range's cells, set only while dragging or while its form is
+  open — never on hover.
 - **`sanitize_state` is the trust boundary**: `COMMENT_KEYS` whitelist, constrained types (`SCOPES`,
   `TYPES`, `COMMENT_ID`, `FIELD_TYPES`), bounded lengths. A field added to a comment on the page but
   missing from `COMMENT_KEYS` is **silently dropped** on save. `FIELD_TYPES` is what keeps a wrong
@@ -300,7 +308,7 @@ anything else.
 ## Still undecided
 
 `claude plugin validate --strict` passes: MIT `LICENSE`, `author` in `plugin.json` (name + GitHub
-URL, no email), and the two version fields aligned on `0.11.0` — `plugin.json` wins at install time.
+URL, no email), and the two version fields aligned on `0.12.0` — `plugin.json` wins at install time.
 The install snippet points at `gilles-g/localpr`, the repository's own remote.
 
 The `marketplace.json` entry **follows `main`**: its `source` is `./`, no tag, no `ref`. Whatever

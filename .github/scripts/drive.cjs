@@ -306,18 +306,50 @@ const expect = (label, ok) => { console.log(`  ${ok ? '✓' : '✗'} ${label}`);
   expect('View in code goes to the thread in the diff',
     (await page.locator('#pane-files').isVisible()) && (await page.locator(`#thread-${visee}`).isVisible()));
 
+  await page.click('#view-split');
+  await page.waitForTimeout(300);
+  await renamed.locator('.line-code[data-side="new"][data-line="3"]').hover();
+  const plus = await page.locator('.add-comment-btn').boundingBox();
+  await page.mouse.move(plus.x + plus.width / 2, plus.y + plus.height / 2);
+  await page.mouse.down();
+  const derniere = await renamed.locator('.line-code[data-side="new"][data-line="6"]').boundingBox();
+  await page.mouse.move(derniere.x + 20, derniere.y + derniere.height / 2, { steps: 4 });
+  expect('dragging the + highlights the range, on its side only', (await renamed.locator('td.sel').count()) === 8);
+  await page.mouse.up();
+  expect('the form names the range',
+    (await page.locator('.form-row-inline .diffstat-text').innerText()) === 'lines 3–6 of the new file');
+  await page.locator('.form-row-inline textarea').fill('extract these four lines');
+  await page.locator('.form-row-inline [data-ok]').click();
+  await page.waitForTimeout(600);
+  const plage = JSON.parse(fs.readFileSync(path.join(out, 'comments.json'), 'utf8')).comments
+    .find((c) => c.body === 'extract these four lines');
+  expect('a range is saved with its last line, in a window of its own side', !!plage &&
+    plage.line === 3 && plage.lineEnd === 6 && plage.anchor === 'a\nB\nc\nd\ne\nf\ng\nh' && plage.anchorOffset === 2);
+  expect('a range thread sits under its last line, badged with the range',
+    (await renamed.locator('tr:has(.line-code[data-side="new"][data-line="6"]) + tr.thread-row .badge-outline')
+      .allInnerTexts()).includes('lines 3–6'));
+  expect('the highlight goes away with the form', (await renamed.locator('td.sel').count()) === 0);
+  await page.click('#tab-conversation');
+  const cartePlage = page.locator('#tracker-list .conv-card', { hasText: 'extract these four lines' });
+  expect('the conversation shows the whole range',
+    (await cartePlage.locator('.conv-file').innerText()) === 'src/Domain/Commission/New.php:3-6' &&
+    (await cartePlage.locator('.conv-num').allInnerTexts()).join() === '3,4,5,6');
+  await page.click('#tab-files');
+
   await page.click('#terminer');
   await page.waitForTimeout(1500);
   expect('review sent', (await page.locator('#state-enreg').innerText()).includes('review sent'));
   expect('TODO.md written', fs.existsSync(path.join(out, 'TODO.md')));
   const todo = fs.readFileSync(path.join(out, 'TODO.md'), 'utf8');
-  expect('TODO.md repeats nothing already sent', todo.startsWith('# 3 comment(s) to handle') &&
+  expect('TODO.md repeats nothing already sent', todo.startsWith('# 4 comment(s) to handle') &&
     todo.includes('Already sent and not repeated here: batch-1.md, ask-2.md, ask-3.md.'));
   expect('a plain reply reaches TODO.md with its thread',
     todo.includes('> do what you suggested') && todo.includes(`in reply to **${askId}**`) &&
     todo.includes('> Same answer there.'));
   expect('a suggestion taken up reaches TODO.md with its origin',
     todo.includes('(taken from a Claude finding, severity major)') && todo.includes('anchor: `B`'));
+  expect('a range reaches TODO.md with its first and last line',
+    todo.includes('lines 3-6') && todo.includes('anchor: `c` … `f`'));
   expect('a sent comment stays sent after a reload', (await page.locator('.badge-outline', { hasText: /^sent$/ }).count()) === 5);
   expect('done sentinel written', fs.existsSync(path.join(out, 'done')));
   expect('server.json removed on clean shutdown', !fs.existsSync(path.join(out, 'server.json')));
