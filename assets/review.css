@@ -995,6 +995,9 @@ tr.hunk .section {
 tr.has-thread .line-num {
   box-shadow: inset 2px 0 0 var(--attention-emphasis);
 }
+.diff-table td.sel {
+  background-image: linear-gradient(var(--attention-subtle), var(--attention-subtle));
+}
 .diff-table td.nonl {
   padding: 1px 10px 1px 68px;
   background: var(--canvas-subtle);

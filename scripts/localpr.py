@@ -913,6 +913,8 @@ JS = r"""
     if (!table) return false;
     var estSplit = table.classList.contains('split');
     if ((prefs.view === 'split') === estSplit) return false;
+    // The unified table is kept for the way back: a highlight left on it returns without its form.
+    if (highlighted.length && section.contains(highlighted[0])) clearHighlight();
     section.querySelectorAll('.thread-row,.form-row-inline').forEach(function (n) { n.remove() });
     if (prefs.view === 'split') {
       section._unified = table;
@@ -927,7 +929,7 @@ JS = r"""
     return true;
   }
 
-  var PAS = D.expandStep;
+  var PAS = D.expandStep, EXTRAIT_MAX = 12;
 
   function ligneDepliee(l, split) {
     var code = '<td class="line-code ctx">' + l.html + '</td>';
@@ -1072,14 +1074,14 @@ JS = r"""
   function extraitCode(c) {
     var section = sectionDe(c);
     if (!section || c.scope !== 'line' || c.line == null) return '';
-    var rows = modele(section), cle = String(c.line), i = -1;
+    var rows = modele(section), fin = c.lineEnd || c.line, d = -1, i = -1;
     for (var k = 0; k < rows.length && i < 0; k++) {
-      var r = rows[k];
-      if (r.t === 'hunk' || r.t === 'nonl' || r.t === 'tail') continue;
-      if (c.side === 'old' ? r.t !== 'add' && r.before === cle : r.t !== 'del' && r.after === cle) i = k;
+      var n = lineOn(rows[k], c.side);
+      if (n === c.line) d = k;
+      if (n === fin) i = k;
     }
-    var lignes = [];
-    for (var j = i; j >= 0 && lignes.length < 4; j--) {
+    var lignes = [], voulues = Math.min(EXTRAIT_MAX, Math.max(4, i - d + 1));
+    for (var j = i; j >= 0 && lignes.length < voulues; j--) {
       if (rows[j].t === 'hunk' || rows[j].t === 'tail') break;
       if (rows[j].t !== 'nonl') lignes.unshift(rows[j]);
     }
@@ -1091,7 +1093,8 @@ JS = r"""
   }
 
   function carte(c) {
-    var e = etatCarte(c), ou = c.file ? c.file + (c.line ? ':' + c.line : '') : 'the whole review';
+    var e = etatCarte(c), lignes = c.line ? ':' + c.line + (c.lineEnd ? '-' + c.lineEnd : '') : '';
+    var ou = c.file ? c.file + lignes : 'the whole review';
     return '<div class="conv-card ' + e + '" data-carte="' + esc(c.id) + '">' +
       '<div class="conv-head"><span class="tracker-dot ' + e + '"></span>' +
       '<span class="conv-file">' + esc(ou) + '</span>' +
@@ -1251,7 +1254,8 @@ JS = r"""
     }
     if (c.origin && c.origin.state === 'dropped') h += '<span class="badge-outline">dropped below threshold</span>';
     if (!c.inReplyTo) {
-      if (c.side === 'old') h += '<span class="badge-outline">deleted line</span>';
+      if (c.side === 'old') h += '<span class="badge-outline">deleted line' + (c.lineEnd ? 's' : '') + '</span>';
+      if (c.lineEnd) h += '<span class="badge-outline">lines ' + esc(c.line + '–' + c.lineEnd) + '</span>';
       if (c.scope === 'file') h += '<span class="badge-outline">whole file</span>';
       if (c.scope === 'global') h += '<span class="badge-outline">global scope</span>';
     }
@@ -1279,7 +1283,7 @@ JS = r"""
   function cible(section, c) {
     if (c.scope !== 'line' || c.line == null) return null;
     var td = section.querySelector('.line-code[data-side="' + (c.side === 'old' ? 'old' : 'new') +
-      '"][data-line="' + c.line + '"]');
+      '"][data-line="' + (c.lineEnd || c.line) + '"]');
     return td ? td.parentNode : null;
   }
 
@@ -1341,6 +1345,7 @@ JS = r"""
     });
     document.querySelectorAll('.thread-row,.form-row-inline').forEach(function (n) { n.remove() });
     document.querySelectorAll('tr.has-thread').forEach(function (n) { n.classList.remove('has-thread') });
+    clearHighlight();
     $('globaux').innerHTML = '';
     var globaux = [];
 
@@ -1357,6 +1362,7 @@ JS = r"""
 
   function closeForm() {
     if (formulaire) { formulaire.remove(); formulaire = null }
+    clearHighlight();
   }
 
   function champs(initial) {
@@ -1424,23 +1430,32 @@ JS = r"""
     });
   }
 
-  function fenetre(section, side, line) {
-    var rows = modele(section).filter(function (r) {
-      return r.t !== 'hunk' && r.t !== 'nonl' && r.t !== 'tail' && !r.etendu;
+  function lineOn(r, side) {
+    if (r.t === 'hunk' || r.t === 'nonl' || r.t === 'tail' || r.etendu) return null;
+    var n = side === 'old' ? (r.t === 'add' ? '' : r.before) : (r.t === 'del' ? '' : r.after);
+    return n ? +n : null;
+  }
+
+  /* One side, one hunk: a deleted line or the next hunk inside the window is text the agent never
+     finds in the file, and a range's last line would no longer sit at anchorOffset + lineEnd - line. */
+  function fenetre(section, side, line, lineEnd) {
+    var rows = modele(section), hunk = null;
+    for (var k = 0; k < rows.length && hunk === null; k++) {
+      if (lineOn(rows[k], side) === line) hunk = rows[k].hunk;
+    }
+    var cote = rows.filter(function (r) { return r.hunk === hunk && lineOn(r, side) !== null });
+    var i = -1, j = -1;
+    cote.forEach(function (r, k) {
+      var n = lineOn(r, side);
+      if (n === line) i = k;
+      if (n === (lineEnd || line)) j = k;
     });
-    var i = -1, cle = String(line);
-    for (var k = 0; k < rows.length; k++) {
-      var r = rows[k];
-      var ok = side === 'old' ? (r.t !== 'add' && r.before === cle) : (r.t !== 'del' && r.after === cle);
-      if (ok) { i = k; break }
-    }
-    if (i < 0) return { anchor: null, offset: null, hunk: null };
-    var lines = [], offset = 0;
-    for (var j = Math.max(0, i - 2); j <= Math.min(rows.length - 1, i + 2); j++) {
-      if (j === i) offset = lines.length;
-      lines.push(rows[j].text);
-    }
-    return { anchor: lines.join('\n'), offset: offset, hunk: rows[i].hunk };
+    if (i < 0 || j < i) return { anchor: null, offset: null, hunk: null };
+    var bas = Math.max(0, i - 2);
+    return {
+      anchor: cote.slice(bas, j + 3).map(function (r) { return r.text }).join('\n'),
+      offset: i - bas, hunk: hunk
+    };
   }
 
   function ajouter(c) {
@@ -1580,12 +1595,12 @@ JS = r"""
     }).catch(function () { switchToFallback('server unreachable - comments kept locally') });
   }
 
-  function creerLigne(section, side, line, type, body, ask) {
-    var idx = +section.dataset.f, f = D.files[idx], a = fenetre(section, side, line);
+  function creerLigne(section, side, line, lineEnd, type, body, ask) {
+    var idx = +section.dataset.f, f = D.files[idx], a = fenetre(section, side, line, lineEnd);
     ajouter({
       scope: 'line', type: type, side: side,
       file: f.path, fichier_index: idx,
-      line: +line, lineEnd: null,
+      line: line, lineEnd: lineEnd,
       hunk: a.hunk,
       anchor: a.anchor, anchorOffset: a.offset, fingerprint: f.fingerprint,
       body: body, origin: null, ask: ask
@@ -1685,7 +1700,7 @@ JS = r"""
   boutonAjout.type = 'button';
   boutonAjout.className = 'add-comment-btn off';
   boutonAjout.textContent = '+';
-  boutonAjout.title = 'Add a comment on this line';
+  boutonAjout.title = 'Comment on this line, or drag to cover several';
   boutonAjout.celluleAncree = null;
   document.body.appendChild(boutonAjout);
 
@@ -1712,7 +1727,88 @@ JS = r"""
     boutonAjout.classList.remove('off');
   }
 
+  /* Every save posts the whole state, refused past MAX_PAYLOAD: a range over a whole generated file
+     would stop the review saving at all. */
+  var RANGE_MAX = 100, selection = null, highlighted = [];
+
+  function clearHighlight() {
+    highlighted.forEach(function (td) { td.classList.remove('sel') });
+    highlighted = [];
+  }
+
+  function highlight(sel) {
+    clearHighlight();
+    var lo = Math.min(sel.start, sel.end), hi = Math.max(sel.start, sel.end);
+    if (lo === hi) return;
+    var split = sel.table.classList.contains('split');
+    for (var n = lo; n <= hi; n++) {
+      var td = sel.cells[n];
+      if (!td) continue;
+      var tr = td.parentNode;
+      var tds = !split ? tr.children : td.dataset.side === sel.side ? [td.previousElementSibling, td]
+                                                                  : [tr.children[0], tr.children[1]];
+      for (var k = 0; k < tds.length; k++) { tds[k].classList.add('sel'); highlighted.push(tds[k]) }
+    }
+  }
+
+  /* A context line is only commentable on the new side: an old-side range still covers it, through
+     the new-side cell of its row. */
+  function startSelection(cell) {
+    var section = cell.closest('.file-diff'), side = cell.dataset.side, line = +cell.dataset.line;
+    var rows = modele(section), table = section.querySelector('.diff-table');
+    var parCle = {}, cells = {}, hunk;
+    rows.forEach(function (r) { if (lineOn(r, side) === line) hunk = r.hunk });
+    table.querySelectorAll('td.line-code[data-line]').forEach(function (td) {
+      parCle[td.dataset.side + td.dataset.line] = td;
+    });
+    rows.forEach(function (r) {
+      var n = r.hunk === hunk ? lineOn(r, side) : null;
+      if (n !== null) cells[n] = parCle[r.t === 'ctx' ? 'new' + r.after : side + n];
+    });
+    clearHighlight();
+    selection = { section: section, table: table, side: side, start: line, end: line,
+                  cells: cells, origin: cell };
+  }
+
+  function extendSelection(target) {
+    var sel = selection, tr = target.closest('tr');
+    var td = tr && tr.querySelector(':scope > td.line-code[data-side="' + sel.side + '"]');
+    if (!td || sel.cells[+td.dataset.line] !== td) return;
+    var n = Math.max(sel.start - RANGE_MAX + 1, Math.min(sel.start + RANGE_MAX - 1, +td.dataset.line));
+    if (n === sel.end) return;
+    sel.end = n;
+    highlight(sel);
+  }
+
+  function cancelSelection() {
+    selection = null;
+    clearHighlight();
+  }
+
+  function finishSelection() {
+    var sel = selection, lo = Math.min(sel.start, sel.end), hi = Math.max(sel.start, sel.end);
+    selection = null;
+    var place = lo < hi ? 'lines ' + lo + '–' + hi : 'line ' + lo;
+    openForm((sel.cells[hi] || sel.origin).parentNode, true, function (t, body, ask) {
+      creerLigne(sel.section, sel.side, lo, lo < hi ? hi : null, t, body, ask);
+    }, sel.side === 'old' ? 'deleted ' + place + ' - not re-anchorable, the hunk travels with it'
+                          : place + ' of the new file');
+    highlight(sel);
+  }
+
+  boutonAjout.addEventListener('mousedown', function (e) {
+    if (e.button !== 0 || !boutonAjout.celluleAncree) return;
+    e.preventDefault();
+    startSelection(boutonAjout.celluleAncree);
+  });
+
+  document.addEventListener('mouseup', function () { if (selection) finishSelection() });
+
   document.addEventListener('mouseover', function (e) {
+    if (selection) {
+      if (e.buttons & 1) extendSelection(e.target); else cancelSelection();
+      return;
+    }
     var cellule = e.target.closest('.line-num[data-line]');
     if (!cellule) {
       var code = e.target.closest('.line-code[data-line]');
@@ -1850,15 +1946,10 @@ JS = r"""
 
     if (e.target.closest('.thread') || e.target.closest('.form-row-inline')) return;
 
-    if (e.target === boutonAjout) {
-      var cellule = boutonAjout.celluleAncree;
-      if (!cellule) return;
-      var section = cellule.closest('.file-diff');
-      var side = cellule.dataset.side, line = cellule.dataset.line;
-      openForm(cellule.parentNode, true, function (t, body, ask) {
-        creerLigne(section, side, line, t, body, ask);
-      }, side === 'old' ? 'deleted line ' + line + ' - not re-anchorable, the hunk travels with it'
-                        : 'line ' + line + ' of the new file');
+    // A mouse click already opened the form on mouseup; only the keyboard gets here with no detail.
+    if (e.target === boutonAjout && !e.detail && boutonAjout.celluleAncree) {
+      startSelection(boutonAjout.celluleAncree);
+      finishSelection();
     }
   });
 
@@ -1916,6 +2007,7 @@ JS = r"""
   document.addEventListener('keydown', function (e) {
     var champ = /^(INPUT|TEXTAREA|SELECT)$/.test((e.target.tagName || '').toUpperCase());
     if (e.key === 'Escape') {
+      cancelSelection();
       closeForm();
       fermerMenus(null);
       if (champ && e.target.id === 'filter') { e.target.value = ''; filtrer(''); e.target.blur() }
@@ -2536,7 +2628,8 @@ def render(model, comments, findings, replies, token, sent=(), sources=None, rel
 
     pied = (
         '<footer class="page-foot">'
-        'Click a line — or the <b>+</b> in the gutter — to comment on it · Ctrl+Enter to submit · '
+        'The <b>+</b> in the gutter comments on a line — drag it to cover several · '
+        'Ctrl+Enter to submit · '
         '<b>/</b> to filter, <b>j</b>/<b>k</b> to move from file to file<br>'
         'No auto-refresh: the diff is frozen at generation time, ↻ re-collects it.<br>'
         f'<span class="mono">{esc(model["repo"])}</span></footer>'
@@ -2769,7 +2862,7 @@ FIELD_TYPES = {
     "anchor": str, "hunk": str, "fingerprint": str, "origin": dict, "ask": dict,
     "fichier_index": int, "line": int, "lineEnd": int, "anchorOffset": int,
 }
-SCOPES = {"line", "range", "file", "global"}
+SCOPES = {"line", "file", "global"}
 TYPES = {"fix", "followUp", "workflowNote"}
 DISMISS_REASONS = {"not-relevant", "duplicate", "outdated"}
 MAX_BODY = 8000
@@ -2894,6 +2987,10 @@ def sanitize_state(raw):
         if isinstance(anchor, str) and offset is not None and \
                 not 0 <= offset < len(anchor.split("\n")):
             raise ValueError(f"anchorOffset out of range on {cid}")
+        ligne, fin = e.get("line"), e.get("lineEnd")
+        if fin is not None and (ligne is None or fin <= ligne or isinstance(anchor, str) and (
+                offset is None or offset + fin - ligne >= len(anchor.split("\n")))):
+            raise ValueError(f"lineEnd out of range on {cid}")
         ask = e.get("ask")
         if ask is not None and (set(ask) - {"skill"} or not (
                 ask.get("skill") is None
@@ -3058,10 +3155,12 @@ ANCHORING = """
 **Finding the line again.** The anchor is not a line number but a *window*: the commented line
 plus/minus 2 lines, with `anchorOffset` giving the index of the target line inside that window. An
 isolated line (`    }`, `    return $this;`, a blank line) occurs dozens of times in a file:
-searching for it alone yields a silent false positive.
+searching for it alone yields a silent false positive. A comment carrying `lineEnd` covers lines
+`line` to `lineEnd`, both included: its window holds the whole range plus 2 lines on each side, the
+range starting at `anchorOffset`.
 
 1. `fingerprint` identical to the file's `sha256` today -> **line numbers are reliable**, go
-   straight to `line`. This is the common case.
+   straight to `line` (to `lineEnd`). This is the common case.
 2. Different fingerprint -> the file moved since the review (php-cs-fixer runs **in write mode**
    under `make quality`, not `--dry-run`: it rewrites lines without moving them). Search for the
    window, stopping at the first rung that yields exactly one candidate:
@@ -3265,7 +3364,9 @@ def write_todo(review, state, entrees, cible, fin, note=None, protocole=PROTOCOL
         lines.append(f"## {file}")
         for c in par_fichier[file]:
             place = []
-            if c.get("line"):
+            if c.get("lineEnd"):
+                place.append(f"lines {c['line']}-{c['lineEnd']}")
+            elif c.get("line"):
                 place.append(f"line {c['line']}")
             if c.get("side"):
                 place.append(f"{c['side']} side")
@@ -3285,9 +3386,10 @@ def write_todo(review, state, entrees, cible, fin, note=None, protocole=PROTOCOL
                 lines.append(f"  (taken from a {c['origin'].get('tool')} finding, "
                               f"severity {c['origin'].get('severity')})")
             if c.get("anchor"):
-                extrait = (c["anchor"].split("\n")[c.get("anchorOffset") or 0]
-                           if c.get("anchor") else "")
-                lines.append(f"  anchor: `{extrait.strip()}`")
+                fenetre, premiere = c["anchor"].split("\n"), c.get("anchorOffset") or 0
+                derniere = premiere + (c["lineEnd"] - c["line"] if c.get("lineEnd") else 0)
+                lines.append(f"  anchor: `{fenetre[premiere].strip()}`"
+                             + (f" … `{fenetre[derniere].strip()}`" if derniere > premiere else ""))
         lines.append("")
 
     lines += [protocole.strip(), "", fin.strip()]

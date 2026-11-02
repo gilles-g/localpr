@@ -1,8 +1,8 @@
 # localpr
 
 Review Claude's uncommitted changes in a local GitHub-style pull request page: comment on any
-line, send comments in batches while Claude keeps working, ask Claude questions answered inline in
-the thread, and get each comment back marked fixed or refused.
+line or range of lines, send comments in batches while Claude keeps working, ask Claude questions
+answered inline in the thread, and get each comment back marked fixed or refused.
 
 ```
 /localpr:review
@@ -132,10 +132,10 @@ repositories degrade to a one-line notice instead of rendering empty.
 
 No build, no dependency. `--check` compares the parsed `+/-` against `git diff --numstat`.
 
-An anchor is a window, not a line number: the commented line ±2. If the file changed since the
-review, the fingerprint says so and the window is searched again — exact, `rstrip`, `strip`,
-normalised whitespace — rather than trusted blindly. A comment on a deleted line cannot be
-re-anchored: the hunk travels with it.
+An anchor is a window, not a line number: the commented line — or range, dragged from the `+` —
+±2. If the file changed since the review, the fingerprint says so and the window is searched again
+— exact, `rstrip`, `strip`, normalised whitespace — rather than trusted blindly. A comment on a
+deleted line cannot be re-anchored: the hunk travels with it.
 
 CI (`.github/workflows/ci.yml`) builds a fixture repository holding every shape that once broke
 the parser, runs `--check` on Python 3.9 and 3.13, verifies the assets, and drives the served
